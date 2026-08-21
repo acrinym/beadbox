@@ -176,6 +176,11 @@ jobs:
           gh workflow run deploy-website.yml --repo "${{ github.repository }}"
 
   publish-public:
+    # beadbox-l5i.6.1: signing secrets are scoped to the `release` environment,
+    # whose ref policy allows only v* tags and main. A job must declare the
+    # environment to read them, and a fork PR's head ref matches neither, so a
+    # fork-triggered run cannot reach these secrets even if it reaches this job.
+    environment: release
     if: ${{ !inputs.skip_public }}
     needs: promote
     runs-on: ubuntu-latest
@@ -324,6 +329,11 @@ jobs:
           echo "Updated release body for $TAG on beadbox/beadbox"
 
   publish-homebrew:
+    # beadbox-l5i.6.1: signing secrets are scoped to the `release` environment,
+    # whose ref policy allows only v* tags and main. A job must declare the
+    # environment to read them, and a fork PR's head ref matches neither, so a
+    # fork-triggered run cannot reach these secrets even if it reaches this job.
+    environment: release
     if: ${{ !inputs.skip_homebrew && !inputs.skip_public }}
     needs: [promote, publish-public]
     runs-on: ubuntu-latest

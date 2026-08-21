@@ -208,6 +208,11 @@ jobs:
   # ── Platform builds (each builds frontend inline, uploads to draft release) ──
 
   build-macos-arm64:
+    # beadbox-l5i.6.1: signing secrets are scoped to the `release` environment,
+    # whose ref policy allows only v* tags and main. A job must declare the
+    # environment to read them, and a fork PR's head ref matches neither, so a
+    # fork-triggered run cannot reach these secrets even if it reaches this job.
+    environment: release
     if: github.event_name == 'push' || inputs.build_macos_arm64
     needs: [build-frontend, create-draft]
     runs-on: macos-14
@@ -374,6 +379,11 @@ jobs:
             --clobber --repo "${{ github.repository }}"
 
   create-arm64-dmg:
+    # beadbox-l5i.6.1: signing secrets are scoped to the `release` environment,
+    # whose ref policy allows only v* tags and main. A job must declare the
+    # environment to read them, and a fork PR's head ref matches neither, so a
+    # fork-triggered run cannot reach these secrets even if it reaches this job.
+    environment: release
     if: github.event_name == 'push' || inputs.build_macos_arm64
     needs: [build-macos-arm64]
     runs-on: macos-14
@@ -529,6 +539,11 @@ jobs:
             --yes --repo "${{ github.repository }}" || true
 
   build-linux:
+    # beadbox-l5i.6.1: signing secrets are scoped to the `release` environment,
+    # whose ref policy allows only v* tags and main. A job must declare the
+    # environment to read them, and a fork PR's head ref matches neither, so a
+    # fork-triggered run cannot reach these secrets even if it reaches this job.
+    environment: release
     if: github.event_name == 'push' || inputs.build_linux
     needs: [build-frontend, create-draft]
     runs-on: ubuntu-latest
@@ -645,6 +660,11 @@ jobs:
           fi
 
   build-windows:
+    # beadbox-l5i.6.1: signing secrets are scoped to the `release` environment,
+    # whose ref policy allows only v* tags and main. A job must declare the
+    # environment to read them, and a fork PR's head ref matches neither, so a
+    # fork-triggered run cannot reach these secrets even if it reaches this job.
+    environment: release
     # beadbox-l5i.1: renamed from build-windows-selfhosted — this now runs on
     # GitHub-hosted windows-latest. The Bun Win32 CWD trap (bb-m4h2) handling
     # below is retained: it is a Bun-on-Windows behaviour, not a runner one.
@@ -1415,6 +1435,11 @@ jobs:
             --repo "${{ github.repository }}"
 
   update-rc-cask:
+    # beadbox-l5i.6.1: signing secrets are scoped to the `release` environment,
+    # whose ref policy allows only v* tags and main. A job must declare the
+    # environment to read them, and a fork PR's head ref matches neither, so a
+    # fork-triggered run cannot reach these secrets even if it reaches this job.
+    environment: release
     if: >-
       always() && !cancelled()
       && (contains(github.ref_name, '-rc') || contains(github.event.inputs.tag, '-rc'))
