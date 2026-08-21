@@ -18,9 +18,9 @@ on:
         type: boolean
         default: true
       build_windows:
-        description: "Build Windows"
+        description: "Build Windows (requires installer signing credentials)"
         type: boolean
-        default: true
+        default: false
 
 concurrency:
   group: release
@@ -668,7 +668,12 @@ jobs:
     # beadbox-l5i.1: renamed from build-windows-selfhosted — this now runs on
     # GitHub-hosted windows-latest. The Bun Win32 CWD trap (bb-m4h2) handling
     # below is retained: it is a Bun-on-Windows behaviour, not a runner one.
-    if: github.event_name == 'push' || inputs.build_windows
+    # Disabled for tag builds: the installer cannot be code-signed until signing
+    # credentials are configured, and publishing an unsigned installer is worse than
+    # publishing none. The job is retained and can be opted into via workflow_dispatch
+    # once signing is available. Downstream promote / publish-update-manifest tolerate
+    # a skipped result (their guard rejects 'failure', not 'skipped').
+    if: inputs.build_windows
     needs: [build-frontend, create-draft]
     runs-on: windows-latest
     timeout-minutes: 30
