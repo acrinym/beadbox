@@ -207,7 +207,13 @@ jobs:
           LOG_DIR="$HOME/Library/Logs/Beadbox"
           # Match: permission denied / not allowed / capability denied / capability missing.
           # Forgiving regex per p4-verification-rubric.md.
-          MATCHES=$(grep -riE 'permission denied|not allowed|capability|permission' "$LOG_DIR" 2>/dev/null | wc -l | tr -d ' ' || echo 0)
+          # The `|| true` must be INSIDE the pipeline. grep exits 1 on no match —
+          # the passing case — and under `set -o pipefail` that failure propagates
+          # even though `wc` already printed 0. A trailing `|| echo 0` then appends
+          # a SECOND line, making MATCHES "0\n0", which is != "0", so the gate
+          # failed on clean logs and dirty ones alike. `wc -l` on empty input
+          # already yields 0, so nothing here is needed for the value itself.
+          MATCHES=$( { grep -riE 'permission denied|not allowed|capability|permission' "$LOG_DIR" 2>/dev/null || true; } | wc -l | tr -d ' ' )
           echo "Capability error matches: $MATCHES"
           if [ "$MATCHES" != "0" ]; then
             echo "::error::Gate 1 failed — $MATCHES capability/permission log lines (expected 0)"
@@ -247,7 +253,10 @@ jobs:
           pkill -TERM -f "beadbox-sidecar" 2>/dev/null || true
           # 500ms grace.
           sleep 0.5
-          STRAGGLERS=$(pgrep -f "Beadbox|beadbox-sidecar" | wc -l | tr -d ' ' || echo 0)
+          # Same pipefail defect as Gate 1, and here the CLEAN case is the one that
+          # broke: pgrep exits 1 when nothing matches — i.e. when there are no
+          # orphaned processes, which is exactly what this gate wants to see.
+          STRAGGLERS=$( { pgrep -f "Beadbox|beadbox-sidecar" || true; } | wc -l | tr -d ' ' )
           if [ "$STRAGGLERS" != "0" ]; then
             echo "::error::Gate 4 failed — $STRAGGLERS process(es) still running after 500ms"
             ps aux | grep -E "Beadbox|beadbox-sidecar" | grep -v grep || true
@@ -349,7 +358,10 @@ jobs:
           LOG_DIR="$HOME/.local/share/Beadbox/logs"
           # Tauri may also write to stderr; check both.
           ALL_LOGS="$LOG_DIR _smoke/app.stderr.log _smoke/app.stdout.log"
-          MATCHES=$(grep -riE 'permission denied|not allowed|capability|permission' $ALL_LOGS 2>/dev/null | wc -l | tr -d ' ' || echo 0)
+          # See the macOS Gate 1 note: the `|| true` belongs inside the pipeline,
+          # or grep's no-match exit trips pipefail and the fallback appends a
+          # second line rather than replacing the value.
+          MATCHES=$( { grep -riE 'permission denied|not allowed|capability|permission' $ALL_LOGS 2>/dev/null || true; } | wc -l | tr -d ' ' )
           echo "Capability error matches: $MATCHES"
           if [ "$MATCHES" != "0" ]; then
             echo "::error::Gate 1 failed — $MATCHES capability/permission log lines (expected 0)"
@@ -372,7 +384,10 @@ jobs:
           [ -n "$PID" ] && kill -TERM "$PID" 2>/dev/null || true
           pkill -TERM -f "beadbox-sidecar" 2>/dev/null || true
           sleep 0.5
-          STRAGGLERS=$(pgrep -f "Beadbox|beadbox-sidecar" | wc -l | tr -d ' ' || echo 0)
+          # Same pipefail defect as Gate 1, and here the CLEAN case is the one that
+          # broke: pgrep exits 1 when nothing matches — i.e. when there are no
+          # orphaned processes, which is exactly what this gate wants to see.
+          STRAGGLERS=$( { pgrep -f "Beadbox|beadbox-sidecar" || true; } | wc -l | tr -d ' ' )
           if [ "$STRAGGLERS" != "0" ]; then
             echo "::error::Gate 4 failed — $STRAGGLERS process(es) still running after 500ms"
             ps aux | grep -E "Beadbox|beadbox-sidecar" | grep -v grep || true
