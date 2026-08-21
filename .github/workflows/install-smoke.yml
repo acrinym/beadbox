@@ -80,7 +80,16 @@ jobs:
     timeout-minutes: 2
     permissions:
       contents: read
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    # beadbox-2tp: deliberately NOT gated on the Release run's conclusion.
+    # Smoke validates the ARTIFACTS. Whether some other job in that run
+    # succeeded is a different question, and gating on the run conclusion let
+    # an unrelated failure disable the launch gate: on the v0.26.0-rc.1 cut,
+    # update-rc-cask failed for a missing secret while updating a DEV cask,
+    # which set the run to failure, which skipped this job, which skipped
+    # every platform job, which the aggregate then reported green.
+    # If the release genuinely produced nothing, resolve fails loudly below —
+    # that is a red gate, not a skipped one.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_run' }}
     outputs:
       tag: ${{ steps.resolve.outputs.tag }}
     env:
@@ -512,25 +521,75 @@ jobs:
   # acceptance criterion: green here on two runs in a row = bb-x6lg.6 done.
   # ─────────────────────────────────────────────────────────────────────
   install-smoke:
-    needs: [smoke-macos-arm64, smoke-linux, smoke-windows]
+    needs: [resolve-tag, smoke-macos-arm64, smoke-linux, smoke-windows]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:
       - name: Aggregate
         env:
+          RESOLVE: ${{ needs.resolve-tag.result }}
           MACOS: ${{ needs.smoke-macos-arm64.result }}
           LINUX: ${{ needs.smoke-linux.result }}
           WINDOWS: ${{ needs.smoke-windows.result }}
+          EVENT: ${{ github.event_name }}
+          INPUT_MACOS: ${{ github.event.inputs.smoke_macos_arm64 }}
         run: |
           set -euo pipefail
+          echo "resolve-tag: $RESOLVE"
           echo "macos-arm64: $MACOS"
           echo "linux:       $LINUX"
           echo "windows:     $WINDOWS"
-          # Treat skipped-due-to-input-toggle as pass; failed/cancelled as fail.
-          for r in "$MACOS" "$LINUX" "$WINDOWS"; do
+          echo "event:       $EVENT"
+
+          # beadbox-2tp: "skipped" means two different things and they must not
+          # be collapsed. A job skipped because an operator turned it off is a
+          # pass. A job skipped because something upstream broke means the thing
+          # this gate exists to check was never checked — that is a failure.
+          # The old aggregate accepted `success|skipped` for every job, so an
+          # all-skipped run reported green over an empty run, which is worse
+          # than having no gate: a missing gate is known to be missing.
+          FAILED=0
+
+          # resolve-tag has no opt-out toggle. If it did not succeed, no
+          # platform job had a tag to test and nothing ran at all.
+          if [ "$RESOLVE" != "success" ]; then
+            echo "::error::resolve-tag did not succeed (result: $RESOLVE) — no artifacts were smoke-tested"
+            FAILED=1
+          fi
+
+          # macOS is the only platform with no legitimate skip on a release
+          # run: its `if:` opts out only when a workflow_dispatch explicitly
+          # sets smoke_macos_arm64=false. Any other skip is upstream breakage.
+          case "$MACOS" in
+            success) ;;
+            skipped)
+              if [ "$EVENT" = "workflow_dispatch" ] && [ "$INPUT_MACOS" = "false" ]; then
+                echo "macos-arm64 skipped by explicit dispatch opt-out — allowed"
+              else
+                echo "::error::smoke-macos-arm64 was SKIPPED without an explicit opt-out — the launch gate did not run"
+                FAILED=1
+              fi
+              ;;
+            *)
+              echo "::error::smoke-macos-arm64 result: $MACOS"
+              FAILED=1
+              ;;
+          esac
+
+          # Linux and Windows may legitimately skip: smoke_linux defaults off
+          # and smoke-windows is `if: false` pending bb-m4h2. A FAILURE in
+          # either is still fatal.
+          for name in LINUX WINDOWS; do
+            eval "r=\${$name}"
             case "$r" in
               success|skipped) ;;
-              *) echo "::error::install-smoke aggregate failed (one or more platform jobs did not pass)"; exit 1 ;;
+              *) echo "::error::smoke-$name result: $r"; FAILED=1 ;;
             esac
           done
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo "::error::install-smoke aggregate FAILED — the release is not smoke-validated"
+            exit 1
+          fi
+          echo "install-smoke aggregate passed: macOS validated the artifacts"
