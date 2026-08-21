@@ -176,6 +176,13 @@ jobs:
           gh workflow run deploy-website.yml --repo "${{ github.repository }}"
 
   publish-public:
+    # Same-repo writes only: creating the release, publishing the notes file and
+    # updating the release body all target THIS repository, so the built-in
+    # GITHUB_TOKEN suffices. It is repo-scoped and expires with the run, which a
+    # PAT is not and does not. The workflow default is contents: read, so the
+    # write is granted here and nowhere else.
+    permissions:
+      contents: write
     # beadbox-l5i.6.1: signing secrets are scoped to the `release` environment,
     # whose ref policy allows only v* tags and main. A job must declare the
     # environment to read them, and a fork PR's head ref matches neither, so a
@@ -209,7 +216,7 @@ jobs:
 
       - name: Publish to public repo
         env:
-          GH_TOKEN: ${{ secrets.PUBLIC_REPO_PAT }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ needs.promote.outputs.final_tag }}"
           VERSION="${{ needs.promote.outputs.version }}"
@@ -257,7 +264,7 @@ jobs:
         # files for the literal name of excluded paths.
         env:
           PRIVATE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PUBLIC_TOKEN: ${{ secrets.PUBLIC_REPO_PAT }}
+          PUBLIC_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PRIVATE_REPO: ${{ github.repository }}
           TAG: ${{ needs.promote.outputs.final_tag }}
         run: |
@@ -311,7 +318,7 @@ jobs:
 
       - name: Update public repo release body with changelog
         env:
-          GH_TOKEN: ${{ secrets.PUBLIC_REPO_PAT }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ needs.promote.outputs.final_tag }}"
 
@@ -329,6 +336,13 @@ jobs:
           echo "Updated release body for $TAG on beadbox/beadbox"
 
   publish-homebrew:
+    # Deliberately NOT contents: write. This job pushes to a DIFFERENT repository
+    # (beadbox/homebrew-cask) using CASK_PAT, which is the only credential here
+    # scoped beyond this repo. It needs no write access to this one, and giving it
+    # any would blur the separation that keeps a cross-repo token off the
+    # same-repo steps.
+    permissions:
+      contents: read
     # beadbox-l5i.6.1: signing secrets are scoped to the `release` environment,
     # whose ref policy allows only v* tags and main. A job must declare the
     # environment to read them, and a fork PR's head ref matches neither, so a
@@ -362,7 +376,7 @@ jobs:
 
       - name: Update Homebrew cask
         env:
-          GH_TOKEN: ${{ secrets.PUBLIC_REPO_PAT }}
+          GH_TOKEN: ${{ secrets.CASK_PAT }}
         run: |
           VERSION="${{ needs.promote.outputs.version }}"
           ARM64_SHA="${{ needs.promote.outputs.arm64_sha }}"
