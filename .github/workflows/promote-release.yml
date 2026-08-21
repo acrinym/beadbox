@@ -38,6 +38,8 @@ jobs:
       final_tag: ${{ steps.parse.outputs.final_tag }}
       version: ${{ steps.parse.outputs.version }}
       arm64_sha: ${{ steps.checksums.outputs.arm64_sha }}
+      darwin_bundle_sha: ${{ steps.checksums.outputs.darwin_bundle_sha }}
+      linux_bundle_sha: ${{ steps.checksums.outputs.linux_bundle_sha }}
 
     steps:
       - name: Parse RC tag
@@ -81,9 +83,20 @@ jobs:
           RC_TAG="${{ steps.parse.outputs.rc_tag }}"
 
           echo "Downloading artifacts from $RC_TAG..."
+          # The updater bundles and their signatures are release artifacts too.
+          # Without them the promoted release has no manifest, the updater
+          # endpoint 404s, and a 404 reads to the client as "no update
+          # available" -- the update path dies silently (beadbox-l5i.6.4).
+          # NB "*.deb" already matched Beadbox_x86_64.deb before this change, so
+          # that one bundle was reaching the workspace and still never being
+          # uploaded; the .sig files and the macOS bundle were not arriving at all.
+          # latest.json is deliberately NOT downloaded: it is regenerated for the
+          # final tag below, and a copy that never enters the workspace cannot be
+          # uploaded by accident.
           gh release download "$RC_TAG" \
             --repo "${{ github.repository }}" \
             --pattern "*.dmg" --pattern "*.deb" --pattern "*.exe" \
+            --pattern "*.app.tar.gz" --pattern "*.sig" --pattern "*.nsis.zip" \
             --clobber
 
           echo ""
@@ -99,12 +112,21 @@ jobs:
           # platforms. When Windows returns it is validated again automatically,
           # and can also be added to an existing release as a later asset.
           # macOS x64 is disabled; AppImage was dropped in v0.25 per bb-ak1x.
+          # The updater bundle + .sig for each shipping platform is REQUIRED for
+          # the same reason the installer is: without them the promoted release
+          # cannot carry a valid manifest, and self-update is silently dead.
           REQUIRED=(
             "Beadbox-${VERSION}-macOS-arm64.dmg"
             "beadbox_${VERSION}_Linux_amd64.deb"
+            "Beadbox_aarch64.app.tar.gz"
+            "Beadbox_aarch64.app.tar.gz.sig"
+            "Beadbox_x86_64.deb"
+            "Beadbox_x86_64.deb.sig"
           )
           OPTIONAL=(
             "Beadbox-${VERSION}-Windows-x64-setup.exe"
+            "Beadbox_x86_64.nsis.zip"
+            "Beadbox_x86_64.nsis.zip.sig"
           )
 
           MISSING=0
@@ -139,6 +161,14 @@ jobs:
 
           ARM64_SHA=$(sha256sum "Beadbox-${VERSION}-macOS-arm64.dmg" | cut -d' ' -f1)
           echo "arm64_sha=$ARM64_SHA" >> "$GITHUB_OUTPUT"
+
+          # The updater signatures cover bundle CONTENTS, so carrying the bundles
+          # forward byte-for-byte is what keeps them valid across regeneration of
+          # latest.json. Checksum them here and re-check after the round trip;
+          # bytes that change in transit would break verification silently, on
+          # the user's machine, at update time.
+          echo "darwin_bundle_sha=$(sha256sum Beadbox_aarch64.app.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "linux_bundle_sha=$(sha256sum Beadbox_x86_64.deb | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Create final tag
         run: |
@@ -180,8 +210,13 @@ jobs:
           ASSETS=(
             "Beadbox-${VERSION}-macOS-arm64.dmg"
             "beadbox_${VERSION}_Linux_amd64.deb"
+            "Beadbox_aarch64.app.tar.gz"
+            "Beadbox_aarch64.app.tar.gz.sig"
+            "Beadbox_x86_64.deb"
+            "Beadbox_x86_64.deb.sig"
           )
           [ -f "Beadbox-${VERSION}-Windows-x64-setup.exe" ] && ASSETS+=("Beadbox-${VERSION}-Windows-x64-setup.exe")
+          [ -f "Beadbox_x86_64.nsis.zip" ] && ASSETS+=("Beadbox_x86_64.nsis.zip" "Beadbox_x86_64.nsis.zip.sig")
 
           gh release create "$FINAL_TAG" \
             "${ASSETS[@]}" \
@@ -221,9 +256,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Updater bundles + signatures ride along (beadbox-l5i.6.4). As in the
+          # promote job, latest.json is deliberately not fetched: it is
+          # regenerated for this tag further down.
           gh release download "${{ needs.promote.outputs.final_tag }}" \
             --repo "${{ github.repository }}" \
             --pattern "*.dmg" --pattern "*.deb" --pattern "*.exe" \
+            --pattern "*.app.tar.gz" --pattern "*.sig" --pattern "*.nsis.zip" \
             --clobber
 
       - name: Verify checksums match
@@ -235,7 +274,21 @@ jobs:
             echo "::error::arm64 DMG checksum mismatch after re-download!"
             exit 1
           fi
-          echo "Checksums verified: artifacts are byte-identical"
+
+          # The updater signatures sign bundle CONTENTS. If these bytes differ by
+          # so much as one, the signature stops verifying -- and it fails on the
+          # user's machine at update time, not here. Check them explicitly.
+          DARWIN_SHA=$(sha256sum "Beadbox_aarch64.app.tar.gz" | cut -d' ' -f1)
+          if [ "$DARWIN_SHA" != "${{ needs.promote.outputs.darwin_bundle_sha }}" ]; then
+            echo "::error::darwin updater bundle checksum mismatch after re-download; its signature would no longer verify"
+            exit 1
+          fi
+          LINUX_SHA=$(sha256sum "Beadbox_x86_64.deb" | cut -d' ' -f1)
+          if [ "$LINUX_SHA" != "${{ needs.promote.outputs.linux_bundle_sha }}" ]; then
+            echo "::error::linux updater bundle checksum mismatch after re-download; its signature would no longer verify"
+            exit 1
+          fi
+          echo "Checksums verified: installers AND updater bundles are byte-identical"
 
       - name: Publish to public repo
         env:
@@ -251,8 +304,13 @@ jobs:
           ASSETS=(
             "Beadbox-${VERSION}-macOS-arm64.dmg"
             "beadbox_${VERSION}_Linux_amd64.deb"
+            "Beadbox_aarch64.app.tar.gz"
+            "Beadbox_aarch64.app.tar.gz.sig"
+            "Beadbox_x86_64.deb"
+            "Beadbox_x86_64.deb.sig"
           )
           [ -f "$WINDOWS_EXE" ] && ASSETS+=("$WINDOWS_EXE")
+          [ -f "Beadbox_x86_64.nsis.zip" ] && ASSETS+=("Beadbox_x86_64.nsis.zip" "Beadbox_x86_64.nsis.zip.sig")
 
           # The release body is built to match the assets actually attached.
           # Listing a Windows installer that was not built would put a download
@@ -373,6 +431,92 @@ jobs:
             --notes "$NOTES"
 
           echo "Updated release body for $TAG on beadbox/beadbox"
+
+      - name: Regenerate latest.json for the final tag
+        # beadbox-l5i.6.4. Without this the promoted release has no manifest at
+        # all: the updater endpoint (.../releases/latest/download/latest.json)
+        # 404s, and a 404 is indistinguishable from "no update available" to the
+        # client -- self-update dies silently while the notes promise otherwise.
+        #
+        # REGENERATED, never copied. The RC's latest.json carries version
+        # "<x>-rc.N" and urls under the PRERELEASE tag, which is routinely
+        # deleted after promotion; copying it would advertise an RC version from
+        # urls that 404.
+        #
+        # Regeneration is safe because a minisign signature covers the bundle
+        # CONTENTS -- not the url, not the version, not the filename. Confirmed
+        # two ways rather than assumed: tauri-plugin-updater 2.10.1 verifies the
+        # streamed download buffer (verify_signature(&buffer, ...) ->
+        # public_key.verify(data, ...), url used only to fetch), and the rc.1
+        # bundles verify against this app's own pubkey from bundle bytes alone --
+        # including through the rename, since the signatures' trusted comments
+        # still name the original bundler filenames.
+        # The bundles are copied byte-for-byte and never rebuilt, which is the
+        # precondition that keeps those signatures valid; the checksum step above
+        # is what enforces it.
+        #
+        # Runs after the release body is set from PM's changelog so `notes`
+        # carries the real changelog rather than a placeholder.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.promote.outputs.final_tag }}
+          VERSION: ${{ needs.promote.outputs.version }}
+        run: |
+          set -euo pipefail
+          REPO="beadbox/beadbox"
+          WORK=$(mktemp -d)
+          trap 'rm -rf "$WORK"' EXIT
+
+          NOTES=$(gh release view "$TAG" --repo "$REPO" --json body --jq '.body')
+          PUB_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          platforms_json=""
+          add_platform() {
+            key="$1"; bundle="$2"; required="$3"
+            if [ ! -f "$bundle" ] || [ ! -f "${bundle}.sig" ]; then
+              if [ "$required" = "required" ]; then
+                echo "::error::missing $bundle or ${bundle}.sig -- the release would ship a manifest with no $key entry, and every $key user's update check would fail for the life of this release"
+                return 1
+              fi
+              echo "Absent (optional): $bundle -- $key omitted from the manifest"
+              return 0
+            fi
+            sig=$(cat "${bundle}.sig")
+            url="https://github.com/${REPO}/releases/download/${TAG}/${bundle}"
+            entry=$(jq -n --arg sig "$sig" --arg url "$url" '{signature:$sig, url:$url}')
+            platforms_json="${platforms_json}\"${key}\":${entry},"
+            echo "  $key -> $bundle"
+          }
+
+          add_platform "darwin-aarch64" "Beadbox_aarch64.app.tar.gz" required
+          add_platform "linux-x86_64"   "Beadbox_x86_64.deb"         required
+          add_platform "windows-x86_64" "Beadbox_x86_64.nsis.zip"    optional
+
+          platforms_json="${platforms_json%,}"
+          if [ -z "$platforms_json" ]; then
+            echo "::error::no platforms resolved; latest.json would be empty"
+            exit 1
+          fi
+
+          jq -n \
+            --arg version "$VERSION" \
+            --arg notes "$NOTES" \
+            --arg pub_date "$PUB_DATE" \
+            --argjson platforms "{${platforms_json}}" \
+            '{version:$version, notes:$notes, pub_date:$pub_date, platforms:$platforms}' \
+            > "$WORK/latest.json"
+
+          # Assert the two things a verbatim copy would have got wrong. These are
+          # the whole point of regenerating, so they are checked, not assumed.
+          jq -e --arg v "$VERSION" '.version == $v' "$WORK/latest.json" >/dev/null \
+            || { echo "::error::latest.json version is not $VERSION"; exit 1; }
+          jq -e --arg t "$TAG" 'all(.platforms[].url; contains("/download/" + $t + "/"))' "$WORK/latest.json" >/dev/null \
+            || { echo "::error::a platform url does not point at $TAG"; exit 1; }
+
+          jq '.notes = (.notes | .[0:60] + "...")' "$WORK/latest.json"
+
+          gh release upload "$TAG" "$WORK/latest.json" --clobber --repo "$REPO"
+          echo "Published latest.json for $TAG"
 
   publish-homebrew:
     # Deliberately NOT contents: write. This job pushes to a DIFFERENT repository
