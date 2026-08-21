@@ -131,7 +131,16 @@ jobs:
           RUST_LOG: tauri_bundler=debug
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          bunx tauri build --bundles app --config '{"build":{"beforeBuildCommand":"true"},"version":"'"$VERSION"'"}'
+          # beadbox-l5i.6.1: createUpdaterArtifacts is OFF for this workflow.
+          # tauri.conf.json enables it globally, which makes the bundler demand
+          # TAURI_SIGNING_PRIVATE_KEY — a key this workflow does not have and
+          # should not be given. This is a DMG-builder helper that publishes
+          # nothing, so it has no need to emit signed updater artifacts, and
+          # handing it the update-signing key would widen exposure of the one
+          # key that can forge an update to every installed client, for zero
+          # functional gain. release.yml legitimately sets that key because it
+          # actually publishes updates.
+          bunx tauri build --bundles app --config '{"build":{"beforeBuildCommand":"true"},"version":"'"$VERSION"'","bundle":{"createUpdaterArtifacts":false}}'
 
       - name: Locate build output
         id: paths
