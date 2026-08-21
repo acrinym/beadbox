@@ -10,7 +10,13 @@
 #
 # Tier 2 (this workflow):
 #   - coverage-server / coverage-client / coverage-rust: enforce
-#     spec §2 Q1 coverage floors (60 / 20 / 65% lines).
+#     coverage floors: server 60 / client 20 / src-tauri Rust 65 lines.
+#     NOTE the "spec §2 Q1" citation used in the failure messages below is a
+#     DANGLING REFERENCE — pm/spec.md §2 is "Data Model" and contains no
+#     coverage section; the floors are recorded nowhere but this file. Flagged
+#     on beadbox-l5i.6.4 for pm to either create the section or drop the
+#     citation. Left in place rather than silently removed so the gap stays
+#     visible.
 #   - mutation-rust: cargo-mutants against src-tauri; floor 75%.
 #   - mutation-server: Stryker on Bun via command-runner (bb-ystl.3 /
 #     QD.3); narrow initial scope (handlers/console.ts) because
@@ -138,7 +144,7 @@ jobs:
           retention-days: 14
 
   coverage-rust:
-    name: Coverage — src-tauri Rust (floor 60% lines)
+    name: Coverage — src-tauri Rust (floor 65% lines)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -200,14 +206,22 @@ jobs:
           echo "staged placeholder for $TRIPLE"
 
       - name: Run Rust coverage with built-in floor enforcement
-        # Floor re-baselined 65 -> 60 (Nelson, beadbox-l5i.1 rework; pm records
-        # the new number in spec §2 Q1). Context so this is not read as a
-        # silent lowering: the gate had never actually run — see the pipefail
-        # note below — and on its first honest run it measured 64.60%
-        # (427/661 lines). The aggregate is dragged by src/updater.rs alone,
-        # which arrived at 179 lines / 37.99% with beadbox-b2p's still-
-        # unfinished self-update work; every other file together is 74.48%.
-        # 60 greens the gate now rather than blocking the epic on b2p's e2e.
+        # Floor RESTORED to 65 (beadbox-l5i.6.4; super-ruled 2026-08-21).
+        #
+        # History, because a floor that moves twice deserves an explanation:
+        # it was lowered 65 -> 60 during beadbox-l5i.1 when the gate ran
+        # honestly for the first time and measured 64.60% (427/661 lines). The
+        # aggregate was dragged by src/updater.rs ALONE — 179 lines at 37.99%,
+        # beadbox-b2p's self-update work — while every other file together was
+        # 74.48%. The lowering was explicitly tied to that one file.
+        #
+        # Cutover phase D deleted updater.rs: a public repo needs no
+        # credentialed fetch, so the whole b2p mechanism retired. The reason
+        # for the lowered floor went with it. First hosted run afterwards
+        # (32517106425) measured 359/482 = 74.48% lines — the ex-updater
+        # figure exactly, as predicted. So 65 is restored with ~9.5 points of
+        # headroom rather than left at a number that had lost its
+        # justification.
         #
         # cargo-llvm-cov has --fail-under-lines built in, so the threshold is
         # the gate and no parsing is required — but ONLY with pipefail set.
@@ -221,7 +235,7 @@ jobs:
         run: |
           set -o pipefail
           cd src-tauri
-          cargo llvm-cov --workspace --fail-under-lines 60 --json --output-path ../coverage-rust.json 2>&1 \
+          cargo llvm-cov --workspace --fail-under-lines 65 --json --output-path ../coverage-rust.json 2>&1 \
             | tee ../coverage-rust.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
