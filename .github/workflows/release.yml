@@ -438,9 +438,12 @@ jobs:
           # signs the file content, not the filename -- rename is safe.
           BUNDLE="src-tauri/target/release/bundle/macos/Beadbox.app.tar.gz"
           if [ ! -f "$BUNDLE" ] || [ ! -f "${BUNDLE}.sig" ]; then
-            echo "::warning::expected $BUNDLE + .sig not found; updater artifacts not uploaded"
+            # beadbox-nxa: fatal, not a warning. See the Linux step for the
+            # reasoning; a missing bundle here drops darwin-aarch64 from
+            # latest.json while the release still publishes green.
+            echo "::error::expected $BUNDLE + .sig not found; updater artifacts not uploaded"
             ls -la src-tauri/target/release/bundle/macos/ || true
-            exit 0
+            exit 1
           fi
           cp "$BUNDLE"        "Beadbox_aarch64.app.tar.gz"
           cp "${BUNDLE}.sig"  "Beadbox_aarch64.app.tar.gz.sig"
@@ -709,24 +712,44 @@ jobs:
           # Linux updater bundle: bundler may emit either AppImage.tar.gz
           # or deb (depending on configured targets) + .sig. Find whichever
           # exists; rename to a stable platform-keyed name for latest.json.
+          set -euo pipefail
           BUNDLE_DIR="src-tauri/target/release/bundle"
           UPLOADED=0
           for candidate in "${BUNDLE_DIR}/appimage"/*.AppImage.tar.gz "${BUNDLE_DIR}/deb"/*.deb; do
             [ -e "$candidate" ] || continue
             sig="${candidate}.sig"
             if [ ! -f "$sig" ]; then continue; fi
-            # name: Beadbox_x86_64.<ext> (ext preserved for bundler-format clarity)
-            ext="${candidate#*.}"           # AppImage.tar.gz or deb
+            # Derive the extension EXPLICITLY. Neither shell trim works here:
+            # the bundler filename carries the version, so ${candidate#*.}
+            # (shortest) cuts at the first dot of "0.26.0" and yields
+            # "26.0_amd64.deb", while ${candidate##*.} (longest) yields "gz"
+            # for the AppImage. Both produce a name the manifest never looks
+            # up, and the old warn-and-pass below made that silent — which is
+            # how linux went missing from latest.json.
+            # These two strings must stay identical to the names
+            # publish-update-manifest fetches: Beadbox_x86_64.AppImage.tar.gz.sig
+            # and Beadbox_x86_64.deb.sig.
+            case "$candidate" in
+              *.AppImage.tar.gz) ext="AppImage.tar.gz" ;;
+              *.deb)             ext="deb" ;;
+              *) echo "::error::unrecognized Linux bundle candidate: $candidate"; exit 1 ;;
+            esac
             base="Beadbox_x86_64.${ext}"
             cp "$candidate" "$base"
             cp "$sig"       "${base}.sig"
             gh release upload "${RELEASE_TAG}" "$base" "${base}.sig" \
               --clobber --repo "${{ github.repository }}"
+            echo "uploaded $base (+ .sig) from $candidate"
             UPLOADED=$((UPLOADED + 1))
           done
           if [ $UPLOADED -eq 0 ]; then
-            echo "::warning::no Linux updater bundle + .sig found in $BUNDLE_DIR"
+            # beadbox-nxa: fatal, not a warning. This job ran, so Linux was
+            # built; producing no updater bundle means latest.json would ship
+            # without a linux-x86_64 entry and every Linux user's update check
+            # would fail for the life of the release, with nothing red here.
+            echo "::error::no Linux updater bundle + .sig found in $BUNDLE_DIR"
             find "$BUNDLE_DIR" -type f \( -name "*.sig" -o -name "*.tar.gz" -o -name "*.AppImage" -o -name "*.deb" \) | head -10
+            exit 1
           fi
 
   build-windows:
@@ -1354,9 +1377,13 @@ jobs:
           # platform-key resolution.
           $bundle = Get-ChildItem "src-tauri\target\release\bundle\nsis" -Filter "*-setup.nsis.zip" -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $bundle -or -not (Test-Path "$($bundle.FullName).sig")) {
-            Write-Output "::warning::expected NSIS .nsis.zip + .sig not found in src-tauri\target\release\bundle\nsis; updater artifacts not uploaded"
+            # beadbox-nxa: fatal, not a warning. Reaching this step means the
+            # Windows job actually ran (it is skipped at job level while
+            # installer signing is pending), so a missing bundle is a real
+            # failure rather than a deliberate opt-out.
+            Write-Output "::error::expected NSIS .nsis.zip + .sig not found in src-tauri\target\release\bundle\nsis; updater artifacts not uploaded"
             Get-ChildItem "src-tauri\target\release\bundle" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 20 FullName | Format-List
-            exit 0
+            exit 1
           }
           Copy-Item $bundle.FullName            "Beadbox_x86_64.nsis.zip"             -Force
           Copy-Item "$($bundle.FullName).sig"  "Beadbox_x86_64.nsis.zip.sig"         -Force

@@ -144,14 +144,31 @@ jobs:
           command -v bd >/dev/null 2>&1 || brew install beads
           bd version
 
-      - name: Download release .app
+      - name: Download release DMG and extract the .app
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # This used to fetch 'Beadbox-app-arm64.tar.gz'. That asset is an
+          # INTERMEDIATE: build-macos-arm64 uploads it purely so create-arm64-dmg
+          # can pull the signed .app across jobs, and cleanup-arm64-tarball then
+          # deletes it from the release. Install Smoke triggers on workflow_run
+          # AFTER Release finishes, so the asset was always already gone by the
+          # time this ran — the download could never have succeeded on that path.
+          #
+          # The DMG is durable (one of the three artifacts check-promote
+          # validates), and it is what a user actually installs, so smoking it
+          # also exercises the DMG's own signature and staple.
           mkdir -p _smoke
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern 'Beadbox-app-arm64.tar.gz' --dir _smoke
-          tar -xzf _smoke/Beadbox-app-arm64.tar.gz -C _smoke
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern 'Beadbox-*-macOS-arm64.dmg' --dir _smoke
+          DMG=$(ls _smoke/Beadbox-*-macOS-arm64.dmg | head -1)
+          [ -n "$DMG" ] || { echo "::error::no macOS arm64 DMG found on $TAG"; exit 1; }
+          echo "Smoking $DMG"
+          MOUNT=$(mktemp -d)
+          hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$MOUNT"
+          # Copy the app out before detaching; the mountpoint is read-only.
+          cp -R "$MOUNT/Beadbox.app" _smoke/
+          hdiutil detach "$MOUNT"
           ls -la _smoke
 
       - name: Install (drop into /Applications)
