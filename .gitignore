@@ -80,3 +80,13 @@ reports/mutation/
 
 # bb-ystl.4 (QD.4): root-level coverage/ artifacts from vitest --coverage runs
 /coverage/
+
+# beadbox-l5i.6.2: website/ lives only in the private repo (pmm authors it);
+# it is not part of this repository and never should be. This entry exists
+# because the cutover left build artifacts behind: `git reset --hard` removes
+# TRACKED files but not untracked ones, so several clones retargeted from the
+# private repo kept website/node_modules and website/out on disk after their
+# tracked source was deleted. Without this line a `git add -A` in such a clone
+# stages those artifacts straight into the public repo — eng2 confirmed with a
+# `git add -An` dry-run that website/out/404.html and friends would have been.
+website/
