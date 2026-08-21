@@ -1,0 +1,101 @@
+# Commit identity enforcement (beadbox-l5i.6.2, Nelson-ruled 2026-08-21).
+#
+# Every commit on this repository must be authored AND committed as
+# "Beadbox <hello@beadbox.app>". Attribution to individuals lives in commit
+# messages and bead IDs, never in author/committer fields.
+#
+# WHY THIS EXISTS AS CI AND NOT JUST CONVENTION: local git config is the only
+# thing standing between a contributor and a permanent public attribution, and
+# it is per-clone, invisible, and easy to miss. At cutover, all eight
+# public-targeting clones had user.name UNSET and were inheriting a global
+# identity naming a real person — one ordinary `git commit` away from putting
+# it in this repo's history forever. Rewriting that after the fact means
+# force-rewriting public history, which branch protection now (correctly)
+# forbids. So it has to be caught on the way in.
+#
+# Both fields are checked because they are set by separate mechanisms
+# (user.name/user.email vs GIT_COMMITTER_*), and either one alone is an equally
+# permanent public attribution.
+#
+# FUTURE EXTERNAL CONTRIBUTORS: every pusher today is a project member, so this
+# is a flat assertion. When outside contributions open up, carve them out here
+# rather than weakening the rule — e.g. skip the check when
+# github.event.pull_request.head.repo.fork is true and require a DCO/CLA on
+# that path instead. Do not simply add names to an allowlist: the point is that
+# this repository speaks with one identity.
+
+name: Commit Identity
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  identity:
+    name: "Author and committer are Beadbox <hello@beadbox.app>"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Check identity on every commit introduced by this event
+        env:
+          EXPECTED: "Beadbox <hello@beadbox.app>"
+          # Via env, never inline ${{ }} in run: — an interpolated ref becomes
+          # shell source before bash sees it.
+          BEFORE: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+
+          # Work out which commits this event actually introduced.
+          # Falls back to HEAD alone when no usable base exists: branch
+          # creation sends an all-zero BEFORE, and a force-push can send a
+          # BEFORE that is no longer an ancestor.
+          range=""
+          if [ -n "${BASE_SHA:-}" ] && git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            range="${BASE_SHA}..${HEAD_SHA}"
+          elif [ -n "${BEFORE:-}" ] \
+            && [ "${BEFORE}" != "0000000000000000000000000000000000000000" ] \
+            && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null \
+            && git merge-base --is-ancestor "${BEFORE}" "${HEAD_SHA}" 2>/dev/null; then
+            range="${BEFORE}..${HEAD_SHA}"
+          fi
+
+          if [ -n "$range" ]; then
+            commits="$(git rev-list "$range")"
+            scope="commits in $range"
+          else
+            commits="${HEAD_SHA}"
+            scope="HEAD only (no usable base for this event)"
+          fi
+
+          n=0
+          bad=0
+          for c in $commits; do
+            n=$((n + 1))
+            a="$(git log -1 --format='%an <%ae>' "$c")"
+            m="$(git log -1 --format='%cn <%ce>' "$c")"
+            if [ "$a" != "$EXPECTED" ] || [ "$m" != "$EXPECTED" ]; then
+              bad=$((bad + 1))
+              echo "::error::${c} identity mismatch"
+              echo "    expected author+committer: ${EXPECTED}"
+              echo "    actual author:             ${a}"
+              echo "    actual committer:          ${m}"
+              echo "    fix: git config user.name 'Beadbox' && git config user.email 'hello@beadbox.app'"
+              echo "    then amend or rebase the offending commit(s)."
+            fi
+          done
+
+          if [ "$bad" -ne 0 ]; then
+            echo "::error::${bad} of ${n} checked commit(s) do not carry the project identity."
+            exit 1
+          fi
+          # The claim states exactly what was checked — scope included.
+          echo "OK: all ${n} checked commit(s) carry ${EXPECTED} as BOTH author and committer (${scope})"
