@@ -1,27 +1,5 @@
 import type * as DiagnosticsHandlers from "@beadbox/server/handlers"
-import {
-  AlertTriangle,
-  ArrowUpCircle,
-  Check,
-  CheckCircle2,
-  ChevronDown,
-  CircleHelp,
-  CircleX,
-  Copy,
-  ExternalLink,
-  FolderOpen,
-  GitBranch,
-  Keyboard,
-  Loader2,
-  Minus,
-  Plus,
-  RefreshCw,
-  RotateCcw,
-  Settings,
-  Stethoscope,
-  Trash2,
-  X,
-} from "lucide-react"
+import { AlertCircle, AlertTriangle, ArrowUpCircle, Check, CheckCircle2, ChevronDown, CircleHelp, CircleX, Copy, ExternalLink, FolderOpen, GitBranch, Keyboard, Loader2, Minus, Plus, RefreshCw, RotateCcw, Settings, Stethoscope, Trash2, X } from "lucide-react"
 import posthog from "posthog-js"
 import { useCallback, useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
@@ -139,6 +117,12 @@ interface SettingsDialogProps {
   onUpdateCheckFrequencyChange: (frequency: UpdateCheckFrequency) => void
   updateAvailable: UpdateInfo | null
   updateChecking: boolean
+  /**
+   * Non-null when the last check FAILED. beadbox-l5i.6.4: this must render
+   * differently from "no update available" — 0.25.x collapsed the two and told
+   * users they were up to date while the fetch was 404ing.
+   */
+  updateCheckError: string | null
   onCheckForUpdates: () => Promise<void>
   onOpenUpdateDialog?: () => void
   initialTab?: SettingsTab
@@ -161,6 +145,7 @@ export function SettingsDialog({
   onUpdateCheckFrequencyChange,
   updateAvailable,
   updateChecking,
+  updateCheckError,
   onCheckForUpdates,
   onOpenUpdateDialog,
   initialTab,
@@ -672,7 +657,16 @@ export function SettingsDialog({
                       {/* Result feedback */}
                       {showCheckResult &&
                         !updateChecking &&
-                        (updateAvailable ? (
+                        (updateCheckError ? (
+                          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                            <AlertCircle className="h-4 w-4 text-destructive shrink-0" />
+                            <span>
+                              Couldn&apos;t check for updates. You may still be on the latest
+                              version — this means the check itself failed, not that no update
+                              exists.
+                            </span>
+                          </div>
+                        ) : updateAvailable ? (
                           <div className="flex items-center gap-2 text-sm">
                             <ArrowUpCircle className="h-4 w-4 text-primary shrink-0" />
                             <span>

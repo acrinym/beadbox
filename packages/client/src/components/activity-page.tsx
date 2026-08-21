@@ -122,6 +122,7 @@ function ActivityViewer() {
     updateAvailable,
     checking: updateChecking,
     checkNow: checkForUpdates,
+    checkError: updateCheckError,
     dismissUpdate,
   } = useUpdateChecker({
     enabled: updateCheckEnabled,
@@ -733,6 +734,7 @@ function ActivityViewer() {
         onUpdateCheckFrequencyChange={handleUpdateCheckFrequencyChange}
         updateAvailable={updateAvailable}
         updateChecking={updateChecking}
+        updateCheckError={updateCheckError}
         onCheckForUpdates={checkForUpdates}
         onOpenUpdateDialog={() => setUpdateDialogOpen(true)}
       />

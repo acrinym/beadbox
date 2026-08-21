@@ -1,19 +1,28 @@
-// Self-update downloader hook (beadbox-b2p, option A-3'). Drives the Rust
-// host command `updater_download_and_install`, which fetches the private
-// asset (Rust holds the token), verifies the .sig against the bundled pubkey,
-// and installs in place. Progress arrives over a Tauri Channel whose event
-// shape matches what the old plugin JS downloadAndInstall() emitted, so the
-// switch below is unchanged.
+// Self-update downloader hook (beadbox-l5i.6.4, cutover phase D).
 //
-// API note: the contract is now startDownload() with NO argument — there is
-// no JS Update object in A-3' (detection + download both live in Rust).
+// Drives the updater plugin's JS downloadAndInstall() directly. The Rust host
+// command it used to invoke existed only to attach a PAT for the private
+// repo; beadbox/beadbox is public, so the plugin fetches the asset
+// anonymously. It still verifies the .sig against the bundled pubkey before
+// installing — that verification is what makes an anonymous fetch safe, and it
+// is unchanged.
+//
+// The event shape is identical to what the Rust Channel emitted
+// (Started/Progress/Finished), so the switch below did not need touching.
+//
+// API note: startDownload() keeps its NO-argument contract. It re-runs check()
+// to obtain the plugin's Update handle rather than threading one down from the
+// checker, which keeps every call site unchanged for one extra round-trip.
 
 import { useCallback, useState } from "react"
 
-// Mirrors the Rust `DownloadEvent` (adjacently tagged {event, data}). The
-// `Finished` variant carries no data.
+// Mirrors tauri-plugin-updater's own DownloadEvent. Note contentLength is
+// OPTIONAL here, not nullable: the Rust host this replaced serialised it as
+// `number | null`, the plugin emits `number | undefined`. The `?? 0` below
+// covers both, but the type has to match the plugin or the callback is not
+// assignable — typecheck caught this, which is the argument for having it.
 type DownloadEvent =
-  | { event: "Started"; data: { contentLength: number | null } }
+  | { event: "Started"; data: { contentLength?: number } }
   | { event: "Progress"; data: { chunkLength: number } }
   | { event: "Finished" }
 
@@ -60,14 +69,21 @@ export function useUpdateDownloader(): UseUpdateDownloaderResult {
       let totalSize = 0
       let downloaded = 0
 
-      const { Channel, invoke } = await import("@tauri-apps/api/core")
+      const { check } = await import("@tauri-apps/plugin-updater")
 
-      // The Rust command streams Started / Progress / Finished, then installs
+      const update = await check()
+      if (!update) {
+        // Nothing to install. Distinct from a failure — see update-checker.ts
+        // on why those two must not collapse into one state.
+        setStatus("idle")
+        return
+      }
+
+      // downloadAndInstall streams Started / Progress / Finished and installs
       // in place before resolving. After it resolves the new binary is staged;
       // the dialog auto-relaunches via its handleQuit useEffect when
       // status === "installed".
-      const onEvent = new Channel<DownloadEvent>()
-      onEvent.onmessage = (event) => {
+      const onEvent = (event: DownloadEvent) => {
         switch (event.event) {
           case "Started":
             totalSize = event.data.contentLength ?? 0
@@ -83,7 +99,7 @@ export function useUpdateDownloader(): UseUpdateDownloaderResult {
         }
       }
 
-      await invoke("updater_download_and_install", { onEvent })
+      await update.downloadAndInstall(onEvent)
 
       setStatus("installed")
     } catch (err) {

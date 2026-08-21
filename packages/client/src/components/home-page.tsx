@@ -105,6 +105,7 @@ function BeadsEpicsViewer() {
     updateAvailable,
     checking: updateChecking,
     checkNow: checkForUpdates,
+    checkError: updateCheckError,
     dismissUpdate,
   } = useUpdateChecker({
     enabled: updateCheckEnabled,
@@ -1119,6 +1120,7 @@ function BeadsEpicsViewer() {
         onUpdateCheckFrequencyChange={handleUpdateCheckFrequencyChange}
         updateAvailable={updateAvailable}
         updateChecking={updateChecking}
+        updateCheckError={updateCheckError}
         onCheckForUpdates={checkForUpdates}
         onOpenUpdateDialog={() => setUpdateDialogOpen(true)}
         initialTab={settingsInitialTab}

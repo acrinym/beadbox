@@ -216,6 +216,7 @@ export function FormulasView() {
     updateAvailable,
     checking: updateChecking,
     checkNow: checkForUpdates,
+    checkError: updateCheckError,
     dismissUpdate,
   } = useUpdateChecker({
     enabled: updateCheckEnabled,
@@ -837,6 +838,7 @@ export function FormulasView() {
         onUpdateCheckFrequencyChange={handleUpdateCheckFrequencyChange}
         updateAvailable={updateAvailable}
         updateChecking={updateChecking}
+        updateCheckError={updateCheckError}
         onCheckForUpdates={checkForUpdates}
         onOpenUpdateDialog={() => setUpdateDialogOpen(true)}
       />

@@ -12,7 +12,6 @@ pub mod paths;
 mod telemetry_id;
 // beadbox-b2p (A-3'): private-repo self-update driven from the Rust host.
 #[cfg(not(target_os = "ios"))]
-mod updater;
 
 // bb-7oq8: predicates extracted from the on_navigation closures in run()
 // so cargo-mutants can actually exercise them. The closures live inside
@@ -72,8 +71,6 @@ pub fn run() {
                 credentials::get_credential,
                 credentials::set_credential,
                 credentials::delete_credential,
-                updater::updater_check,
-                updater::updater_download_and_install,
             ])
             .setup(move |app| {
                 let builder = tauri::WebviewWindowBuilder::new(

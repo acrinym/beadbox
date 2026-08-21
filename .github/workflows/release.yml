@@ -1337,18 +1337,17 @@ jobs:
             return 1
           }
 
-          # beadbox-b2p (A-3'): nmelo/beadbox is PRIVATE. The
-          # github.com/<repo>/releases/download/<tag>/<artifact> redirect 404s
-          # for private repos even WITH a token, so latest.json's per-platform
-          # url MUST be the REST asset-API form. The Rust host (updater.rs)
-          # fetches these with Authorization: Bearer + Accept:
-          # application/octet-stream. Resolve each bundle's per-release asset id
-          # by name (empty -> skip that platform).
-          asset_api_url() {
-            local id
-            id=$(jq -r --arg n "$1" '.assets[] | select(.name==$n) | .id' "$WORK/assets.json")
-            if [ -n "$id" ] && [ "$id" != "null" ]; then
-              printf 'https://api.github.com/repos/%s/releases/assets/%s' "$REPO" "$id"
+          # beadbox-l5i.6.4 (cutover D): releases are PUBLIC, so latest.json's
+          # per-platform url is the plain download redirect, fetched
+          # anonymously by the updater plugin. This replaces the REST
+          # asset-API form b2p needed, which required an Authorization header
+          # and a runtime asset-id lookup — the redirect only ever 404'd
+          # because the repo was private.
+          # Existence is still checked by NAME so a missing bundle skips its
+          # platform rather than emitting a URL that 404s for users.
+          public_download_url() {
+            if grep -qxF "$1" "$WORK/assets.txt"; then
+              printf 'https://github.com/%s/releases/download/%s/%s' "$REPO" "$TAG" "$1"
             fi
           }
 
@@ -1356,12 +1355,12 @@ jobs:
 
           # darwin-aarch64
           if sig=$(fetch_sig "Beadbox_aarch64.app.tar.gz.sig"); then
-            url=$(asset_api_url "Beadbox_aarch64.app.tar.gz")
+            url=$(public_download_url "Beadbox_aarch64.app.tar.gz")
             if [ -n "$url" ]; then
               entry=$(jq -n --arg sig "$sig" --arg url "$url" '{signature:$sig, url:$url}')
               platforms_json+="\"darwin-aarch64\":${entry},"
             else
-              echo "::warning::darwin bundle asset id not found on $TAG; skipping darwin-aarch64"
+              echo "::warning::darwin bundle bundle not found on $TAG; skipping darwin-aarch64"
             fi
           fi
 
@@ -1369,24 +1368,24 @@ jobs:
           for linux_name in "Beadbox_x86_64.AppImage.tar.gz.sig" "Beadbox_x86_64.deb.sig"; do
             if sig=$(fetch_sig "$linux_name"); then
               artifact="${linux_name%.sig}"
-              url=$(asset_api_url "$artifact")
+              url=$(public_download_url "$artifact")
               if [ -n "$url" ]; then
                 entry=$(jq -n --arg sig "$sig" --arg url "$url" '{signature:$sig, url:$url}')
                 platforms_json+="\"linux-x86_64\":${entry},"
                 break
               fi
-              echo "::warning::linux bundle ${artifact} asset id not found; trying next"
+              echo "::warning::linux bundle ${artifact} bundle not found; trying next"
             fi
           done
 
           # windows-x86_64
           if sig=$(fetch_sig "Beadbox_x86_64.nsis.zip.sig"); then
-            url=$(asset_api_url "Beadbox_x86_64.nsis.zip")
+            url=$(public_download_url "Beadbox_x86_64.nsis.zip")
             if [ -n "$url" ]; then
               entry=$(jq -n --arg sig "$sig" --arg url "$url" '{signature:$sig, url:$url}')
               platforms_json+="\"windows-x86_64\":${entry},"
             else
-              echo "::warning::windows bundle asset id not found on $TAG; skipping windows-x86_64"
+              echo "::warning::windows bundle bundle not found on $TAG; skipping windows-x86_64"
             fi
           fi
 
@@ -1494,7 +1493,6 @@ jobs:
           ARM64_SHA: ${{ needs.create-arm64-dmg.outputs.sha }}
           ARM64_ID: ${{ steps.assets.outputs.arm64_id }}
         run: |
-          RUBY_INTERP='#{ENV["HOMEBREW_GITHUB_API_TOKEN"]}'
           cat > homebrew-cask-dev/Casks/beadbox-rc.rb << EOF
           cask "beadbox-rc" do
             version "${VERSION}"
@@ -1502,11 +1500,10 @@ jobs:
             arch arm: "arm64"
 
             sha256 "${ARM64_SHA}"
-            url "https://api.github.com/repos/nmelo/beadbox/releases/assets/${ARM64_ID}",
-                header: [
-                  "Accept: application/octet-stream",
-                  "Authorization: Bearer ${RUBY_INTERP}",
-                ]
+            # beadbox-l5i.6.4: public releases need no auth header. This was
+            # the asset-API form with a Bearer token only because the repo was
+            # private; brew now fetches the plain download URL anonymously.
+            url "https://github.com/${GITHUB_REPOSITORY}/releases/download/v#{version}/Beadbox-#{version}-macOS-arm64.dmg"
 
             name "Beadbox RC"
             desc "Desktop app for the beads issue tracker (release candidate)"

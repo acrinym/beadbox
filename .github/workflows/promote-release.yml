@@ -2,8 +2,8 @@ name: Promote RC to Final Release
 
 # Promotes validated RC artifacts to a final release without rebuilding.
 # Downloads the exact binaries from an RC release and republishes them as the
-# final version on both the private (nmelo/beadbox) and public (beadbox/beadbox)
-# repos, then updates the Homebrew cask.
+# final version on both the origin repo and the public repo, then updates the
+# Homebrew cask.
 #
 # Usage: gh workflow run promote-release.yml -f rc_tag=v0.7.0-rc.2
 
