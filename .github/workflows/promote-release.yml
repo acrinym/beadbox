@@ -218,20 +218,30 @@ jobs:
           [ -f "Beadbox-${VERSION}-Windows-x64-setup.exe" ] && ASSETS+=("Beadbox-${VERSION}-Windows-x64-setup.exe")
           [ -f "Beadbox_x86_64.nsis.zip" ] && ASSETS+=("Beadbox_x86_64.nsis.zip" "Beadbox_x86_64.nsis.zip.sig")
 
+          # DRAFT-FIRST (beadbox-l5i.6.4). A release is not complete until the
+          # updater manifest is attached, and that happens in publish-public.
+          # Publishing here meant any later failure left a LIVE "Latest" release
+          # with no manifest -- the updater endpoint 404s, and a 404 reads to the
+          # client as "no update available", so self-update dies silently.
+          # Creating a draft closes that window rather than shortening it: a
+          # failure anywhere downstream now leaves an invisible draft, which is
+          # recoverable and harms nobody. publish-public flips it to published as
+          # its final act.
           gh release create "$FINAL_TAG" \
             "${ASSETS[@]}" \
             --repo "${{ github.repository }}" \
+            --draft \
             --title "$FINAL_TAG" \
             --notes "Release ${VERSION} (promoted from ${RC_TAG})"
 
-          echo "Created release $FINAL_TAG on private repo"
+          echo "Created DRAFT release $FINAL_TAG"
 
-      - name: Trigger website deploy
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          echo "Triggering website deploy for ${{ steps.parse.outputs.final_tag }}..."
-          gh workflow run deploy-website.yml --repo "${{ github.repository }}"
+          # skip_public means publish-public never runs, so nothing will attach a
+          # manifest and nothing will flip the draft. Say so loudly rather than
+          # leaving someone to wonder why the release never appeared.
+          if [ "${{ inputs.skip_public }}" = "true" ]; then
+            echo "::warning::skip_public is set, so publish-public will not run: no updater manifest will be attached and $FINAL_TAG will remain a DRAFT. Publish it manually only if you accept a release whose self-update does not work."
+          fi
 
   publish-public:
     # Same-repo writes only: creating the release, publishing the notes file and
@@ -333,9 +343,12 @@ jobs:
             echo "Visit [beadbox.app](https://beadbox.app) for install options."
           } > "$NOTES_FILE"
 
+          # Draft here too; the flip to published is the last step of this job,
+          # after the manifest exists. See the draft-first note in promote.
           gh release create "$TAG" \
             "${ASSETS[@]}" \
             --repo beadbox/beadbox \
+            --draft \
             --title "$TAG" \
             --notes-file "$NOTES_FILE"
 
@@ -517,6 +530,75 @@ jobs:
 
           gh release upload "$TAG" "$WORK/latest.json" --clobber --repo "$REPO"
           echo "Published latest.json for $TAG"
+
+      - name: Publish the release
+        # THE LAST STEP, deliberately. Everything above can fail without a user
+        # ever seeing a broken release, because until this runs the release is a
+        # draft: invisible, not "Latest", and not resolved by the updater
+        # endpoint. This is the step that makes it real, and it only runs once
+        # the manifest is attached.
+        # Guard before flipping: refuse to publish a release that does not carry
+        # a manifest and the bundles it points at. The whole point of draft-first
+        # is that this check has somewhere safe to fail.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.promote.outputs.final_tag }}
+          VERSION: ${{ needs.promote.outputs.version }}
+        run: |
+          set -euo pipefail
+          REPO="beadbox/beadbox"
+          names=$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name')
+          echo "Assets on $TAG:"; echo "$names" | sed 's/^/  /'
+
+          missing=0
+          for required in latest.json \
+                          Beadbox_aarch64.app.tar.gz Beadbox_aarch64.app.tar.gz.sig \
+                          Beadbox_x86_64.deb Beadbox_x86_64.deb.sig; do
+            echo "$names" | grep -qxF "$required" || { echo "::error::$TAG is missing $required"; missing=1; }
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::refusing to publish $TAG: it would go live with a broken or absent updater manifest. The release stays a DRAFT."
+            exit 1
+          fi
+
+          gh release edit "$TAG" --repo "$REPO" --draft=false
+          echo "Published $TAG"
+
+  trigger-website-deploy:
+    # DECOUPLED (beadbox-l5i.6.4). This was the last step of the promote job, so
+    # its failure failed that job, which skipped publish-public -- the job that
+    # attaches the updater manifest. A convenience trigger for a workflow in a
+    # DIFFERENT repository took down the release's update path.
+    #
+    # It is now a terminal job: NOTHING may declare needs on it. That is the
+    # actual fix -- structural, not a tolerance flag. Being unable to gate
+    # anything is a property of the graph, not of anyone remembering to be
+    # careful here.
+    #
+    # Note it is NOT made silently non-fatal. A genuine trigger failure should be
+    # visible; it just cannot take anything else with it. The one KNOWN benign
+    # case -- the workflow simply not existing in this repository, because the
+    # website is deployed from its own -- is detected and reported explicitly
+    # rather than swallowed.
+    if: ${{ !inputs.skip_public }}
+    needs: [promote, publish-public]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    steps:
+      - name: Trigger website deploy
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.promote.outputs.final_tag }}
+        run: |
+          set -euo pipefail
+          if ! gh workflow view deploy-website.yml --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::notice::deploy-website.yml is not present in $GITHUB_REPOSITORY; the site is deployed from its own repository. Nothing to trigger for $TAG."
+            exit 0
+          fi
+          echo "Triggering website deploy for $TAG..."
+          gh workflow run deploy-website.yml --repo "$GITHUB_REPOSITORY"
 
   publish-homebrew:
     # Deliberately NOT contents: write. This job pushes to a DIFFERENT repository
