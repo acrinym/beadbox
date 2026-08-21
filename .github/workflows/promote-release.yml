@@ -40,6 +40,7 @@ jobs:
       arm64_sha: ${{ steps.checksums.outputs.arm64_sha }}
       darwin_bundle_sha: ${{ steps.checksums.outputs.darwin_bundle_sha }}
       linux_bundle_sha: ${{ steps.checksums.outputs.linux_bundle_sha }}
+      release_id: ${{ steps.create.outputs.release_id }}
 
     steps:
       - name: Parse RC tag
@@ -194,7 +195,8 @@ jobs:
             git push origin "$FINAL_TAG"
           fi
 
-      - name: Create final release on private repo
+      - name: Create final release
+        id: create
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -202,8 +204,26 @@ jobs:
           FINAL_TAG="${{ steps.parse.outputs.final_tag }}"
           RC_TAG="${{ steps.parse.outputs.rc_tag }}"
 
-          # Delete existing final release if present (from a previous failed attempt or rebuild)
-          gh release delete "$FINAL_TAG" --repo "${{ github.repository }}" --yes 2>/dev/null || true
+          REPO="${{ github.repository }}"
+          # exported so the jq filters below can read it as env.FINAL_TAG;
+          # `gh api --jq` takes a single expression and does NOT accept jq's
+          # --arg (it errors with "accepts 1 arg(s)"), so env is the way in.
+          export FINAL_TAG
+
+          # Remove any prior release object for this tag, BY ID.
+          # The old form was `gh release delete "$FINAL_TAG" ... || true`, and a
+          # by-tag delete cannot resolve a DRAFT: GET /releases/tags/<tag> 404s
+          # for drafts. So it silently no-opped behind the `|| true` and the
+          # create below added a SECOND object. Two creates, two drafts, one tag
+          # -- and every downstream by-tag lookup became a coin flip.
+          # Listing and deleting by id is the only form that can reach a draft,
+          # and nothing here is silent.
+          stale=$(gh api "repos/$REPO/releases" --paginate \
+                    --jq '.[] | select(.tag_name==env.FINAL_TAG) | .id' 2>/dev/null || true)
+          for id in $stale; do
+            echo "Removing pre-existing release object $id for $FINAL_TAG"
+            gh api --method DELETE "repos/$REPO/releases/$id"
+          done
 
           # Same required/optional split as the validation step: attach Windows
           # only if it was actually built, otherwise gh fails on a missing file.
@@ -236,6 +256,19 @@ jobs:
 
           echo "Created DRAFT release $FINAL_TAG"
 
+          # Exactly one object must claim this tag. If a duplicate ever
+          # reappears, fail here rather than leaving every downstream lookup to
+          # pick one at random. Drafts are only addressable by id, so the id is
+          # what the rest of the pipeline consumes from now on.
+          mapfile -t ids < <(gh api "repos/$REPO/releases" --paginate \
+                               --jq '.[] | select(.tag_name==env.FINAL_TAG) | .id')
+          if [ "${#ids[@]}" -ne 1 ]; then
+            echo "::error::expected exactly 1 release object for $FINAL_TAG, found ${#ids[@]}: ${ids[*]}"
+            exit 1
+          fi
+          echo "release_id=${ids[0]}" >> "$GITHUB_OUTPUT"
+          echo "Release object id: ${ids[0]}"
+
           # skip_public means publish-public never runs, so nothing will attach a
           # manifest and nothing will flip the draft. Say so loudly rather than
           # leaving someone to wonder why the release never appeared.
@@ -262,18 +295,46 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      - name: Download artifacts from final release
+      - name: Assert this workflow runs in the release repo
+        # publish-public now operates on the release object promote created, by
+        # id. That is only correct while both target the SAME repository, which
+        # is true after the cutover. Assert it rather than assume it: run
+        # anywhere else and this fails loudly instead of quietly acting on the
+        # wrong release.
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REPOSITORY" != "beadbox/beadbox" ]; then
+            echo "::error::this job assumes the release lives in beadbox/beadbox but is running in $GITHUB_REPOSITORY"
+            exit 1
+          fi
+
+      - name: Download artifacts from the draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.promote.outputs.release_id }}
         run: |
-          # Updater bundles + signatures ride along (beadbox-l5i.6.4). As in the
-          # promote job, latest.json is deliberately not fetched: it is
-          # regenerated for this tag further down.
-          gh release download "${{ needs.promote.outputs.final_tag }}" \
-            --repo "${{ github.repository }}" \
-            --pattern "*.dmg" --pattern "*.deb" --pattern "*.exe" \
-            --pattern "*.app.tar.gz" --pattern "*.sig" --pattern "*.nsis.zip" \
-            --clobber
+          set -euo pipefail
+          REPO="$GITHUB_REPOSITORY"
+          # BY ASSET ID, not by tag. A DRAFT release is not addressable by tag --
+          # GET /releases/tags/<tag> returns 404 for drafts -- so every by-tag
+          # lookup here was impossible the moment draft-first landed, and this
+          # job's steps were starved rather than failing on their own merits.
+          # latest.json is deliberately not fetched: it is regenerated below, and
+          # a copy that never lands in the workspace cannot be uploaded stale.
+          gh api "repos/$REPO/releases/$RELEASE_ID" \
+            --jq '.assets[] | "\(.id)\t\(.name)"' > /tmp/assets.tsv
+          echo "Assets on release $RELEASE_ID:"; sed 's/^/  /' /tmp/assets.tsv
+
+          while IFS=$'\t' read -r aid name; do
+            case "$name" in
+              latest.json) continue ;;
+              *.dmg|*.deb|*.exe|*.app.tar.gz|*.sig|*.nsis.zip)
+                gh api -H "Accept: application/octet-stream" \
+                  "repos/$REPO/releases/assets/$aid" > "$name"
+                echo "downloaded $name ($(stat -c%s "$name") bytes)" ;;
+              *) echo "skipped $name" ;;
+            esac
+          done < /tmp/assets.tsv
 
       - name: Verify checksums match
         run: |
@@ -300,15 +361,21 @@ jobs:
           fi
           echo "Checksums verified: installers AND updater bundles are byte-identical"
 
-      - name: Publish to public repo
+      - name: Set release title and body
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.promote.outputs.release_id }}
         run: |
+          set -euo pipefail
           TAG="${{ needs.promote.outputs.final_tag }}"
           VERSION="${{ needs.promote.outputs.version }}"
 
-          gh release delete "$TAG" --repo beadbox/beadbox --yes 2>/dev/null || true
-
+          # NO delete-and-recreate. promote already created this release object
+          # and its asset list is identical, so creating a second one only
+          # manufactured a duplicate: the old `gh release delete "$TAG" ... ||
+          # true` could not resolve a DRAFT by tag, no-opped silently, and the
+          # create below added another object claiming the same tag. We now
+          # update promote's object in place, by id.
           WINDOWS_EXE="Beadbox-${VERSION}-Windows-x64-setup.exe"
 
           ASSETS=(
@@ -343,14 +410,18 @@ jobs:
             echo "Visit [beadbox.app](https://beadbox.app) for install options."
           } > "$NOTES_FILE"
 
-          # Draft here too; the flip to published is the last step of this job,
-          # after the manifest exists. See the draft-first note in promote.
-          gh release create "$TAG" \
-            "${ASSETS[@]}" \
-            --repo beadbox/beadbox \
-            --draft \
-            --title "$TAG" \
-            --notes-file "$NOTES_FILE"
+          # Assets are already attached by promote; verify the set matches what
+          # this job expects rather than re-uploading it.
+          have=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" --jq '.assets[].name')
+          for a in "${ASSETS[@]}"; do
+            echo "$have" | grep -qxF "$a" || { echo "::error::expected asset $a is not on release $RELEASE_ID"; exit 1; }
+          done
+          echo "All ${#ASSETS[@]} expected assets present on release $RELEASE_ID"
+
+          # Title + body by id. jq builds the payload so no shell quoting can
+          # corrupt release prose.
+          jq -n --arg name "$TAG" --arg body "$(cat "$NOTES_FILE")" '{name:$name, body:$body}' \
+            | gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" --input - --silent
 
       - name: Publish PM-authored release notes to public repo
         # beadbox-l5i.9 / pm/systemdesign.md §6.2 (release-notes pipeline,
@@ -426,10 +497,41 @@ jobs:
 
           echo "Created ${DEST} in beadbox/beadbox"
 
-      - name: Update public repo release body with changelog
+          # ASSERT THE ARTIFACT, NOT THE EXIT CODE (pm, beadbox-l5i.6.4).
+          # The fail-loud above proves the SOURCE exists. Nothing proved the
+          # published FILE appeared, so three promote runs died upstream of this
+          # step, the notes never published, and nothing noticed. Read it back
+          # from the repository and require it to be non-empty.
+          # Same shape as the missing manifest: a step that reports success for
+          # an outcome nobody checked.
+          # Branch on gh's EXIT CODE, not on whether the output looks empty.
+          # `gh api` prints its error JSON to STDOUT on a 404, so
+          # `SIZE=$(gh api ... || echo "")` captures that error text and an
+          # emptiness test then reports the file as PRESENT. Caught while
+          # testing this very assertion against the missing v0.26.0 changelog --
+          # a check for silent success that was itself silently succeeding.
+          if ! PUBLISHED_SIZE=$(GH_TOKEN="$PUBLIC_TOKEN" gh api \
+                 "repos/beadbox/beadbox/contents/${DEST}" --jq '.size' 2>/dev/null); then
+            echo "::error::${DEST} is not present in beadbox/beadbox after publishing it. The in-app update dialog reads this exact path."
+            exit 1
+          fi
+          case "$PUBLISHED_SIZE" in
+            ''|*[!0-9]*)
+              echo "::error::unexpected size response for ${DEST}: '${PUBLISHED_SIZE}'"
+              exit 1 ;;
+          esac
+          if [ "$PUBLISHED_SIZE" -le 0 ]; then
+            echo "::error::${DEST} exists in beadbox/beadbox but is empty (${PUBLISHED_SIZE} bytes)."
+            exit 1
+          fi
+          echo "Verified ${DEST} present in beadbox/beadbox (${PUBLISHED_SIZE} bytes)"
+
+      - name: Update release body with changelog
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.promote.outputs.release_id }}
         run: |
+          set -euo pipefail
           TAG="${{ needs.promote.outputs.final_tag }}"
 
           # Use the changelog file we just generated
@@ -438,12 +540,10 @@ jobs:
             exit 0
           fi
 
-          NOTES=$(cat /tmp/changelog-version.md)
-          gh release edit "$TAG" \
-            --repo beadbox/beadbox \
-            --notes "$NOTES"
+          jq -n --arg body "$(cat /tmp/changelog-version.md)" '{body:$body}' \
+            | gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" --input - --silent
 
-          echo "Updated release body for $TAG on beadbox/beadbox"
+          echo "Updated release body for $TAG (release id $RELEASE_ID)"
 
       - name: Regenerate latest.json for the final tag
         # beadbox-l5i.6.4. Without this the promoted release has no manifest at
@@ -474,13 +574,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.promote.outputs.final_tag }}
           VERSION: ${{ needs.promote.outputs.version }}
+          RELEASE_ID: ${{ needs.promote.outputs.release_id }}
         run: |
           set -euo pipefail
-          REPO="beadbox/beadbox"
+          REPO="$GITHUB_REPOSITORY"
           WORK=$(mktemp -d)
           trap 'rm -rf "$WORK"' EXIT
 
-          NOTES=$(gh release view "$TAG" --repo "$REPO" --json body --jq '.body')
+          NOTES=$(gh api "repos/$REPO/releases/$RELEASE_ID" --jq '.body')
           PUB_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
           platforms_json=""
@@ -528,8 +629,18 @@ jobs:
 
           jq '.notes = (.notes | .[0:60] + "...")' "$WORK/latest.json"
 
-          gh release upload "$TAG" "$WORK/latest.json" --clobber --repo "$REPO"
-          echo "Published latest.json for $TAG"
+          # Upload by release id. --clobber has no id-addressed equivalent, so
+          # remove any existing asset of this name first; POSTing over one fails.
+          existing=$(gh api "repos/$REPO/releases/$RELEASE_ID" \
+                       --jq '.assets[] | select(.name=="latest.json") | .id')
+          for aid in $existing; do
+            gh api --method DELETE "repos/$REPO/releases/assets/$aid"
+          done
+          gh api --method POST \
+            -H "Content-Type: application/json" \
+            "https://uploads.github.com/repos/$REPO/releases/$RELEASE_ID/assets?name=latest.json" \
+            --input "$WORK/latest.json" --silent
+          echo "Published latest.json for $TAG (release id $RELEASE_ID)"
 
       - name: Publish the release
         # THE LAST STEP, deliberately. Everything above can fail without a user
@@ -544,10 +655,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.promote.outputs.final_tag }}
           VERSION: ${{ needs.promote.outputs.version }}
+          RELEASE_ID: ${{ needs.promote.outputs.release_id }}
         run: |
           set -euo pipefail
-          REPO="beadbox/beadbox"
-          names=$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name')
+          REPO="$GITHUB_REPOSITORY"
+          names=$(gh api "repos/$REPO/releases/$RELEASE_ID" --jq '.assets[].name')
           echo "Assets on $TAG:"; echo "$names" | sed 's/^/  /'
 
           missing=0
@@ -561,8 +673,15 @@ jobs:
             exit 1
           fi
 
-          gh release edit "$TAG" --repo "$REPO" --draft=false
-          echo "Published $TAG"
+          jq -n '{draft:false}' \
+            | gh api --method PATCH "repos/$REPO/releases/$RELEASE_ID" --input - --silent
+          echo "Published $TAG (release id $RELEASE_ID)"
+
+          # It must now be addressable by tag -- that is what "published" means,
+          # and it is what the updater's latest/download/... endpoint relies on.
+          gh api "repos/$REPO/releases/tags/$TAG" --jq '.id' >/dev/null \
+            || { echo "::error::$TAG still not resolvable by tag after publishing"; exit 1; }
+          echo "Confirmed $TAG resolves by tag"
 
   trigger-website-deploy:
     # DECOUPLED (beadbox-l5i.6.4). This was the last step of the promote job, so
@@ -623,10 +742,18 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release download "${{ needs.promote.outputs.final_tag }}" \
-            --repo "${{ github.repository }}" \
-            --pattern "*.dmg" \
-            --clobber
+          # By id, for the same reason as publish-public. This job runs after the
+          # flip so the tag WOULD resolve today, but that is an ordering
+          # accident rather than a guarantee; the id is correct whenever it runs.
+          REPO="${{ github.repository }}"
+          RELEASE_ID="${{ needs.promote.outputs.release_id }}"
+          gh api "repos/$REPO/releases/$RELEASE_ID" \
+            --jq '.assets[] | select(.name|endswith(".dmg")) | "\(.id)\t\(.name)"' > /tmp/hb-assets.tsv
+          while IFS=$'\t' read -r aid name; do
+            gh api -H "Accept: application/octet-stream" \
+              "repos/$REPO/releases/assets/$aid" > "$name"
+            echo "downloaded $name"
+          done < /tmp/hb-assets.tsv
 
       - name: Verify checksums match
         run: |
