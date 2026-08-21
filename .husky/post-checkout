@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# bb-2l16: warn (don't auto-fix) when a branch checkout brings in
+# package-tree changes that can leave stale node_modules behind.
+#
+# Background — bb-yjdz triage: switching between spike/bun-migration-tb0
+# and origin/main produces 134 phantom test failures from stale
+# node_modules. The most common shape is jest-dom matcher registration
+# drift (different vitest / jest-dom versions cached on disk). Recovery
+# is `rm -rf node_modules .next && bun install`. The trap is that the
+# failures look like real regressions, so engineers debug the wrong thing.
+#
+# This hook detects the trigger conditions and suggests the recovery
+# command. It does NOT auto-delete anything — node_modules is large,
+# blowing it away on every checkout would break parallel `bun install`
+# or the next dev-server start, and engineers should consent to the
+# disruption with their own keystroke.
+#
+# Hook arg contract (`man githooks`):
+#   $1 — previous HEAD SHA
+#   $2 — new HEAD SHA
+#   $3 — flag: 1 = branch checkout, 0 = file checkout
+#
+# Exit codes are advisory only: post-checkout's exit code is ignored
+# by git, so a bug here can't break checkouts. We exit 0 unconditionally
+# at the bottom.
+
+set -u
+
+prev="${1:-}"
+next="${2:-}"
+is_branch="${3:-0}"
+
+# File checkouts (git checkout -- path) don't change branch state, no warning needed.
+[ "$is_branch" = "1" ] || exit 0
+
+# Same SHA both ways (e.g. `git checkout same-branch` or initial clone with prev=000...).
+# Initial clone: prev is the all-zeros SHA, which doesn't resolve — bail without warning.
+[ "$prev" != "$next" ] || exit 0
+git rev-parse --quiet --verify "$prev^{commit}" >/dev/null 2>&1 || exit 0
+
+# What package-tree files changed between the two commits? If none, no warning.
+# The set below is the surface that touches node_modules / build caches:
+#   - root + per-package package.json + bun lockfile (JS / TS deps)
+#   - website/pnpm-lock.yaml (the website is its own pnpm tree)
+#   - src-tauri/Cargo.{toml,lock} (Rust deps; cargo cache outside node_modules
+#     but stale builds bite the same way)
+# Use `--quiet` so git doesn't dump the diff to stdout; we just want the exit code.
+TRIGGERS=(
+  package.json
+  bun.lock
+  bun.lockb
+  packages/client/package.json
+  packages/server/package.json
+  website/package.json
+  website/pnpm-lock.yaml
+  src-tauri/Cargo.toml
+  src-tauri/Cargo.lock
+)
+
+changed=""
+for path in "${TRIGGERS[@]}"; do
+  if ! git diff --quiet "$prev" "$next" -- "$path" 2>/dev/null; then
+    changed="${changed}${changed:+ }${path}"
+  fi
+done
+
+# Also detect the known-bad transition by branch name regardless of file
+# changes — spike/bun-migration-tb0 ↔ main is the bb-yjdz trap that
+# motivated this hook. Branch name lookup is best-effort; on a detached
+# HEAD checkout the heuristic falls through to file changes alone.
+prev_branch="$(git name-rev --name-only "$prev" 2>/dev/null | sed 's@.*/@@; s@\^.*@@; s@~.*@@')"
+next_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
+known_bad_transition=0
+case "$prev_branch:$next_branch" in
+  spike/bun-migration-tb0:main|main:spike/bun-migration-tb0)
+    known_bad_transition=1
+    ;;
+esac
+
+if [ -z "$changed" ] && [ "$known_bad_transition" = "0" ]; then
+  exit 0
+fi
+
+# Compose the warning. ANSI color is gated on stderr being a TTY so log
+# capture / CI doesn't see escape sequences. The message names the exact
+# command to copy-paste; a bare suggestion that doesn't include the
+# command would just push engineers back to the wiki.
+if [ -t 2 ]; then
+  bold="$(printf '\033[1m')"
+  yellow="$(printf '\033[33m')"
+  reset="$(printf '\033[0m')"
+else
+  bold=""
+  yellow=""
+  reset=""
+fi
+
+{
+  echo ""
+  echo "${yellow}${bold}⚠  Branch-switch hygiene warning (bb-2l16)${reset}"
+  if [ "$known_bad_transition" = "1" ]; then
+    echo "    Switching between ${bold}${prev_branch}${reset} and ${bold}${next_branch}${reset} —"
+    echo "    these branches have diverged Bun/Vite/Next dependency trees."
+  fi
+  if [ -n "$changed" ]; then
+    echo "    Package-tree files differ between the previous and new HEAD:"
+    for path in $changed; do
+      echo "      • $path"
+    done
+  fi
+  echo ""
+  echo "    Stale node_modules can produce phantom test failures (e.g. jest-dom"
+  echo "    matcher drift surfacing as 134 failed tests on bb-yjdz). If you hit"
+  echo "    unexpected failures, reset the JS deps:"
+  echo ""
+  echo "      ${bold}rm -rf node_modules .next packages/*/node_modules website/node_modules && bun install${reset}"
+  echo ""
+  echo "    This hook does NOT auto-delete; run the command yourself when you're ready."
+  echo ""
+} >&2
+
+exit 0

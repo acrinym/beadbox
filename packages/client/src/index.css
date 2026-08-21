@@ -1,0 +1,402 @@
+/* Beadbox SPA stylesheet.
+   Ported from app/globals.css (P2.2 / bb-cqpc.2). The body below is a
+   verbatim port; only the @fontsource imports are prepended so the font
+   @font-face rules register before Tailwind utilities reference them.
+   next/font/google's --font-* CSS variable bindings are reproduced as
+   plain :root vars below so existing class references keep working. */
+
+/* @fontsource ships the @font-face declarations + the .woff2 files.
+   Replaces next/font/google for the SPA.
+
+   bb-5vpr: switched from @fontsource/geist-{sans,mono} static-weight
+   files to @fontsource-variable/geist + @fontsource-variable/geist-mono
+   variable-axis fonts. The static packages required one @import per
+   weight (bb-mxiy added 700 to fix WKWebView synthetic-bold), but
+   even with all weights loaded the static glyphs render with subtle
+   visual differences vs the variable axis at the same nominal weight.
+   v0.24's next/font/google loaded the variable font; matching that
+   gives bit-for-bit visual parity. Variable packages register family
+   names 'Geist Variable' / 'Geist Mono Variable' with font-weight: 100
+   900 — every Tailwind weight class resolves through the same axis.
+   No more discrete-vs-variable rendering drift. No more synthetic bold.
+
+   Inter remains on the static package; it's declared in :root for legacy
+   --font-inter compat but not consumed in markup. Will be cleaned up in a
+   separate dead-deps bead. */
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
+@import "@fontsource/inter/index.css";
+@import "@fontsource/inter/400.css";
+@import "@fontsource/inter/500.css";
+@import "@fontsource/inter/600.css";
+
+/* ─── Begin verbatim port of app/globals.css ─── */
+
+@import 'tailwindcss';
+@import 'tw-animate-css';
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --destructive-foreground: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --radius: 0.625rem;
+}
+
+.dark {
+  --background: #0f172a;
+  --foreground: #f1f5f9;
+  --card: #1e293b;
+  --card-foreground: #f1f5f9;
+  --popover: #1e293b;
+  --popover-foreground: #f1f5f9;
+  --primary: #22c55e;
+  --primary-foreground: #0f172a;
+  --secondary: #334155;
+  --secondary-foreground: #f1f5f9;
+  --muted: #334155;
+  --muted-foreground: #94a3b8;
+  --accent: #334155;
+  --accent-foreground: #f1f5f9;
+  --destructive: #ef4444;
+  --destructive-foreground: #fef2f2;
+  --border: #334155;
+  --input: #334155;
+  --ring: #22c55e;
+}
+
+.dark.theme-gray {
+  --background: #18181b;
+  --foreground: #f4f4f5;
+  --card: #27272a;
+  --card-foreground: #f4f4f5;
+  --popover: #27272a;
+  --popover-foreground: #f4f4f5;
+  --primary: #22c55e;
+  --primary-foreground: #18181b;
+  --secondary: #3f3f46;
+  --secondary-foreground: #f4f4f5;
+  --muted: #3f3f46;
+  --muted-foreground: #a1a1aa;
+  --accent: #3f3f46;
+  --accent-foreground: #f4f4f5;
+  --destructive: #ef4444;
+  --destructive-foreground: #fef2f2;
+  --border: #3f3f46;
+  --input: #3f3f46;
+  --ring: #22c55e;
+}
+
+.dark.theme-green {
+  --background: #0c1a14;
+  --foreground: #ecfdf5;
+  --card: #14291e;
+  --card-foreground: #ecfdf5;
+  --popover: #14291e;
+  --popover-foreground: #ecfdf5;
+  --primary: #34d399;
+  --primary-foreground: #0c1a14;
+  --secondary: #1e3a2b;
+  --secondary-foreground: #ecfdf5;
+  --muted: #1e3a2b;
+  --muted-foreground: #6ee7b7;
+  --accent: #1e3a2b;
+  --accent-foreground: #ecfdf5;
+  --destructive: #ef4444;
+  --destructive-foreground: #fef2f2;
+  --border: #1e3a2b;
+  --input: #1e3a2b;
+  --ring: #34d399;
+}
+
+/* WKWebView fix (P3.7 second bounce / B3, qa1): the prior `@theme inline`
+   block declared every `--color-*` token as `var(--<token>)`, leaving the
+   cascade walk to use-time. Chromium (Vite dev / Playwright) resolved the
+   chain through `.dark.theme-gray` on <html> correctly; the Tauri WKWebView
+   either failed the oklch() fallback at `:root` (collapsing the var to an
+   IACVT default that matched the background) or scoped the `var()` lookup
+   to the @theme definition site rather than the consuming element. Net
+   effect: text rendered the same color as the background.
+   Fix: inline the literal `.dark.theme-gray` values directly into @theme so
+   no runtime cascade walk is required. The `--background`/`--foreground`/
+   etc. vars below remain in their scoped blocks for other consumers
+   (`dag-dotgrid`, `safe-area-inset` selectors using color-mix on
+   `--color-muted-foreground` etc), but the utility-class color tokens
+   resolve to literal values at parse time — WKWebView-safe.
+   index.html hardcodes `class="dark theme-gray"`, so this is a parity-
+   preserving change for the only theme the SPA currently uses. Restoring
+   runtime theme switching via classname swap is a separate concern (a
+   future bead would need to either re-introduce the var() chain inside
+   a different scope structure or rebuild the @theme block dynamically). */
+@theme inline {
+  /* bb-2e4v (P0 v0.25-rc.2 blocker): @fontsource registers Geist as
+     `Geist Sans` (not `Geist`); `Geist Fallback` was a next/font/google-
+     synthesized system-fallback face that doesn't exist post-migration.
+     Both names left the Tauri WKWebView falling through to UA default
+     (Times serif on macOS). bun run dev / tauri dev / bun preview all
+     mask this when Geist is installed as a system font (macOS resolves
+     bare `Geist` from the system installation). The production .app is
+     the only context that surfaces it — same shape as bb-eze7's
+     production-bundle URL gap (addendum 6 instance #12). Match the
+     literal @fontsource-registered names + system fallbacks. */
+  --font-sans: 'Geist Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'Geist Mono Variable', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --color-background: #18181b;
+  --color-foreground: #f4f4f5;
+  --color-card: #27272a;
+  --color-card-foreground: #f4f4f5;
+  --color-popover: #27272a;
+  --color-popover-foreground: #f4f4f5;
+  --color-primary: #22c55e;
+  --color-primary-foreground: #18181b;
+  --color-secondary: #3f3f46;
+  --color-secondary-foreground: #f4f4f5;
+  --color-muted: #3f3f46;
+  --color-muted-foreground: #a1a1aa;
+  --color-accent: #3f3f46;
+  --color-accent-foreground: #f4f4f5;
+  --color-destructive: #ef4444;
+  --color-destructive-foreground: #fef2f2;
+  --color-border: #3f3f46;
+  --color-input: #3f3f46;
+  --color-ring: #22c55e;
+  --radius-sm: calc(0.625rem - 4px);
+  --radius-md: calc(0.625rem - 2px);
+  --radius-lg: 0.625rem;
+  --radius-xl: calc(0.625rem + 4px);
+}
+
+/* iOS/iPadOS safe area insets (Dynamic Island, status bar, home indicator) */
+.safe-area-inset {
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+}
+
+/* Extra top buffer for touch devices (iPad status bar needs more room) */
+@media (hover: none) and (pointer: coarse) {
+  .safe-area-inset {
+    padding-top: calc(env(safe-area-inset-top, 0px) + 20px);
+  }
+}
+
+/* Formula DAG dot-grid background (opacity via color, not container opacity) */
+.dag-dotgrid {
+  background-image: radial-gradient(circle, color-mix(in srgb, var(--color-muted-foreground) 25%, transparent) 0.4px, transparent 0.4px);
+  background-size: 24px 24px;
+  background-position: 12px 12px;
+}
+
+/* Strip React Flow default node chrome so only our custom styling shows */
+.dag-dotgrid .react-flow__node {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+  border-radius: 0 !important;
+}
+
+/* Render edges above nodes so they don't hide behind node backgrounds */
+.dag-dotgrid .react-flow__edges {
+  z-index: 5 !important;
+}
+
+
+/* Bead table responsive container queries */
+.bead-table-container {
+  container-type: inline-size;
+}
+
+.bead-row {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.bead-row-header {
+  display: flex;
+}
+
+.bead-row-title {
+  flex: 1;
+  text-align: left;
+}
+
+.bead-row-spacer {
+  display: none;
+}
+
+.bead-row-archive {
+  order: 98;
+}
+
+.bead-row-delete {
+  order: 99;
+}
+
+@container (max-width: 864px) {
+  .bead-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.25rem 0.5rem;
+  }
+  /* Row 1: ID, then badges right-aligned */
+  .bead-row-id { order: 1; }
+  .bead-row-type { order: 2; margin-left: auto; }
+  .bead-row-status { order: 3; }
+  .bead-row-priority { order: 4; }
+  /* Use assignee as line break */
+  .bead-row-assignee {
+    order: 5;
+    flex-basis: 100%;
+    height: 0;
+    margin: 0;
+    overflow: hidden;
+  }
+  /* Row 2: Title + Delete */
+  .bead-row-title {
+    order: 6;
+    flex: 1;
+  }
+  .bead-row-archive { order: 7; }
+  .bead-row-delete { order: 8; }
+  .bead-row-header { display: none; }
+}
+
+/* Responsive priority pill labels */
+.pill-label-full { display: inline; }
+.pill-label-short { display: none; }
+
+.epic-tree-container {
+  container-type: inline-size;
+}
+
+@container (max-width: 600px) {
+  .pill-label-full { display: none; }
+  .pill-label-short { display: inline; }
+}
+
+/* Utility class to hide scrollbars */
+.hide-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+@keyframes pulse-ring {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 0; }
+}
+
+@keyframes pipeline-pulse {
+  0% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.03); opacity: 0.85; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+.animate-pipeline-pulse {
+  animation: pipeline-pulse 1s ease-in-out;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    font-size: 16.39px;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+
+  /* bb-s3gb: percentage-height chain so h-full shells track the WKWebView frame under Cmd+/- pageZoom (vh stays pegged to the un-zoomed frame). */
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  /* Custom scrollbar styling.
+     bb-kcur: scope from `*` to actual scroll containers. The universal
+     selector caused WebKit to fire WebPage_SetScrollbarAvoidanceCornerRadii
+     IPC per element on initial render — 50+ messages, hitting the
+     WKWebView 129-message queue limit on every launch. `:where(...)`
+     keeps specificity at 0 so Tailwind utilities continue to win. The
+     selector list covers `html`/`body` (document scroll container) plus
+     `[class*="overflow-"]` which catches every Tailwind overflow utility
+     (overflow-y-auto / overflow-x-auto / overflow-auto / overflow-hidden /
+     overflow-x-hidden / overflow-wrap) — coverage of all 27 overflow-*
+     consumers in components/ without hand-listing each scroll container.
+     Radix ScrollArea uses custom DOM scrollbars (not native
+     ::-webkit-scrollbar), so it doesn't need its own scope. */
+  :where(html, body, [class*="overflow-"]) {
+    scrollbar-width: thin;
+    scrollbar-color: var(--muted) transparent;
+  }
+
+  :where(html, body, [class*="overflow-"])::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  :where(html, body, [class*="overflow-"])::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  :where(html, body, [class*="overflow-"])::-webkit-scrollbar-thumb {
+    background-color: var(--muted);
+    border-radius: 4px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+
+  :where(html, body, [class*="overflow-"])::-webkit-scrollbar-thumb:hover {
+    background-color: var(--muted-foreground);
+  }
+
+  :where(html, body, [class*="overflow-"])::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+}
+
+
+/* ─── End verbatim port of app/globals.css ─── */
+
+/* bb-5vpr: dropped legacy --font-geist-sans / --font-geist-mono bindings.
+   Originally declared in the Next.js port (next/font/google's
+   `Geist({ variable: '--font-geist-sans' })` would have been consumed via
+   `var(--font-geist-sans)` somewhere). Verified zero consumers in src/
+   (no `var(--font-geist-*)` references). Plus the literal value `"Geist"`
+   was wrong post-@fontsource swap (registered names are 'Geist Variable'
+   / 'Geist Mono Variable'); a future reader who consumed it would have
+   got the system fallback silently. Better to remove the misleading
+   binding than perpetuate the dead surface.
+
+   --font-inter is also unused but kept here as a surface bookmark for
+   the dead-deps cleanup bead (which will drop both the var declaration
+   and the @fontsource/inter package). */
+:root {
+  --font-inter: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+}

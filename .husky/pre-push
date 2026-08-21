@@ -1,0 +1,56 @@
+# bb-yelc: git invokes hooks with GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE
+# (and friends) set on the hook process. Without stripping, every
+# descendant — bun:test → bd init → dolt clone → git init --bare —
+# inherits them and fails with:
+#   "fatal: GIT_WORK_TREE (or --work-tree=<directory>) not allowed
+#    without specifying GIT_DIR (or --git-dir=<directory>)"
+# Reproduces 100% under the hook context (not a flake — eng3's
+# attribution was wrong; the hard failure just LOOKED flaky because
+# nobody had isolated the GIT_* variable). Strip at the hook root so
+# the entire descendant tree starts clean and tests can spawn git/bd
+# naively in their own cwd. Per-test fixtures (e.g. bd-workspace.ts
+# from bb-aeb2) keep their own GIT_* stripping as defense-in-depth.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_NAMESPACE GIT_PREFIX
+
+# bb-lh8f: skip code-quality gates on pure ref-deletion pushes (e.g.
+# `git push origin :refs/heads/<branch>` or the `--delete` alias) per
+# pm/systemdesign.md §6.3 Pre-Push Hook Policy. Trigger contract is
+# documented in §6.3 and implemented in .husky/_is-deletion-only-push.sh
+# (sourced helper), which sets ALL_DELETIONS + ANY_SPECS for this skip
+# clause. The skip clause itself stays at the top of the hook body per
+# §6.3's "implementation anchor". Mixed batches (any non-deletion spec)
+# fall through to the full gate suite.
+. "$(dirname "$0")/_is-deletion-only-push.sh"
+if [ "$ANY_SPECS" = "true" ] && [ "$ALL_DELETIONS" = "true" ]; then
+  exit 0
+fi
+
+# bb-ystl.2 (QD.2 Tier 1): fast quality gates run BEFORE the existing
+# bb-y0me side-effect lint + bun test block. Order matters — cheaper
+# checks fail first so a CCN regression doesn't pay the 50s cost of
+# running the full test suite. Spec §2 Q2 Tier 1 budget: <30s for
+# this block.
+#
+# The hook DOES NOT run coverage or mutation — those are minutes-to-
+# hours and live in CI (.github/workflows/quality-gates.yml, Tier 2).
+
+# 1. biome lint+format (already wired via package.json's `lint` script)
+bun run lint
+
+# 2. Per-package typecheck (tsc --noEmit per workspace)
+bun --cwd=packages/server run typecheck
+bun --cwd=packages/client run typecheck
+
+# 3. Lizard CCN ≥ 15 against changed files only (full-repo scan is in CI).
+#    bb-ystl.5 owns scripts/check-ccn-allowlist.sh — exact <file>:<function>
+#    match against lizard-allowlist.txt. The previous bb-ystl.2 implementation
+#    used a subtract-count heuristic (lizard warning count minus allowlist
+#    line count) that could pass when N new violations equalled N pre-existing
+#    allowlist entries even though the actual functions differed. The script
+#    now compares pairs.
+bash scripts/check-ccn-allowlist.sh --mode=changed
+
+# 4. Existing bb-y0me side-effect lint + the test suite
+python3 src-tauri/scripts/lint-test-side-effects.py
+bun run test
+bd sql "CALL dolt_push('origin', 'main')" || true

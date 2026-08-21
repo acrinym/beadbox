@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
+  <title>Beadbox</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      min-height: 100vh;
+      min-height: 100dvh;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+    .container {
+      width: 100%;
+      max-width: 400px;
+      padding: 24px;
+    }
+
+    /* Logo / Title */
+    .logo {
+      text-align: center;
+      margin-bottom: 40px;
+    }
+    .logo h1 {
+      font-size: 32px;
+      font-weight: 700;
+      color: #f1f5f9;
+      letter-spacing: -0.5px;
+    }
+    .logo p {
+      color: #64748b;
+      font-size: 14px;
+      margin-top: 4px;
+    }
+
+    /* Form */
+    .form-group {
+      margin-bottom: 16px;
+    }
+    label {
+      display: block;
+      font-size: 13px;
+      font-weight: 500;
+      color: #94a3b8;
+      margin-bottom: 6px;
+    }
+    input[type="url"] {
+      width: 100%;
+      padding: 14px 16px;
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 10px;
+      color: #f1f5f9;
+      font-size: 16px; /* Prevents iOS zoom on focus */
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      outline: none;
+      -webkit-appearance: none;
+    }
+    input[type="url"]:focus {
+      border-color: #3b82f6;
+      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+    }
+    input[type="url"]::placeholder {
+      color: #475569;
+    }
+
+    .btn {
+      width: 100%;
+      padding: 14px;
+      border: none;
+      border-radius: 10px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+      min-height: 48px;
+    }
+    .btn-primary {
+      background: #3b82f6;
+      color: #fff;
+    }
+    .btn-primary:active {
+      background: #2563eb;
+    }
+    .btn-secondary {
+      background: transparent;
+      color: #64748b;
+      font-size: 14px;
+      font-weight: 400;
+      padding: 12px;
+    }
+    .btn-secondary:active {
+      color: #94a3b8;
+    }
+
+    /* Connecting state */
+    .connecting {
+      text-align: center;
+    }
+    .spinner {
+      width: 40px;
+      height: 40px;
+      border: 3px solid #1e293b;
+      border-top-color: #3b82f6;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin: 0 auto 20px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .connecting h2 {
+      font-size: 18px;
+      font-weight: 600;
+      color: #f1f5f9;
+      margin-bottom: 8px;
+    }
+    .connecting .url-display {
+      font-size: 13px;
+      color: #64748b;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      word-break: break-all;
+      margin-bottom: 24px;
+    }
+
+    /* Error state */
+    .error-msg {
+      background: #1e1215;
+      border: 1px solid #7f1d1d;
+      border-radius: 10px;
+      padding: 12px 16px;
+      margin-bottom: 16px;
+      font-size: 14px;
+      color: #fca5a5;
+      display: none;
+    }
+
+    /* Desktop loading state */
+    .loading {
+      text-align: center;
+    }
+    .bead-dots {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 3px;
+      margin-bottom: 24px;
+    }
+    .bead-dot {
+      border-radius: 50%;
+      background: #3b82f6;
+    }
+    .bead-dot-1 { width: 16px; height: 16px; opacity: 1; }
+    .bead-dot-2 { width: 14px; height: 14px; opacity: 0.9; }
+    .bead-dot-3 { width: 12px; height: 12px; opacity: 0.7; }
+    .bead-dot-4 { width: 10px; height: 10px; opacity: 0.5; }
+    .bead-dot-5 { width: 8px; height: 8px; opacity: 0.35; }
+    .loading .spinner {
+      width: 20px;
+      height: 20px;
+      border-width: 2px;
+      margin: 0 auto 12px;
+    }
+    .loading-text {
+      font-size: 14px;
+      color: #64748b;
+    }
+    .loading-error {
+      margin-top: 24px;
+    }
+    .loading-error p {
+      font-size: 14px;
+      color: #fca5a5;
+      margin-bottom: 12px;
+    }
+    .btn-restart {
+      display: inline-block;
+      padding: 10px 20px;
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      color: #e2e8f0;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+    .btn-restart:active {
+      background: #334155;
+    }
+
+    /* Hide states */
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <!-- Desktop Loading State -->
+  <div id="loading-view" class="container hidden">
+    <div class="loading">
+      <div class="bead-dots">
+        <div class="bead-dot bead-dot-1"></div>
+        <div class="bead-dot bead-dot-2"></div>
+        <div class="bead-dot bead-dot-3"></div>
+        <div class="bead-dot bead-dot-4"></div>
+        <div class="bead-dot bead-dot-5"></div>
+      </div>
+      <div class="spinner"></div>
+      <p class="loading-text">Starting up...</p>
+      <div id="loading-error" class="loading-error hidden">
+        <p>Server is taking longer than expected to start.</p>
+        <button class="btn-restart" onclick="window.location.reload()">Restart Beadbox</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Connect Form (iOS) -->
+  <div id="form-view" class="container hidden">
+    <div class="logo">
+      <h1>Beadbox</h1>
+      <p>Connect to your Beadbox server</p>
+    </div>
+
+    <div id="error" class="error-msg"></div>
+
+    <div class="form-group">
+      <label for="server-url">Server URL</label>
+      <input
+        type="url"
+        id="server-url"
+        placeholder="http://hostname:3000"
+        autocapitalize="none"
+        autocorrect="off"
+        spellcheck="false"
+      />
+    </div>
+
+    <button id="connect-btn" class="btn btn-primary" onclick="connect()">Connect</button>
+  </div>
+
+  <!-- Connecting State (iOS) -->
+  <div id="connecting-view" class="container hidden">
+    <div class="connecting">
+      <div class="spinner"></div>
+      <h2>Connecting</h2>
+      <p id="connecting-url" class="url-display"></p>
+      <button class="btn btn-secondary" onclick="cancelConnect()">Change server</button>
+    </div>
+  </div>
+
+  <script>
+    var STORAGE_KEY = 'beadbox_server_url';
+    var DEFAULT_URL = '';
+    var CONNECT_TIMEOUT_MS = 8000;
+    var DESKTOP_TIMEOUT_MS = 45000;
+    var safetyTimeout = null;
+    var desktopTimeout = null;
+
+    // Sidecar detection: Rust passes ?sidecar=1 on desktop builds.
+    // iOS builds have no sidecar, so the param is absent.
+    // (Previous maxTouchPoints detection broke on macOS 16 where trackpads report > 1.)
+    var params = new URLSearchParams(window.location.search);
+    var hasSidecar = params.get('sidecar') === '1';
+
+    var urlInput = document.getElementById('server-url');
+    var formView = document.getElementById('form-view');
+    var connectingView = document.getElementById('connecting-view');
+    var connectingUrl = document.getElementById('connecting-url');
+    var errorDiv = document.getElementById('error');
+    var loadingView = document.getElementById('loading-view');
+    var loadingError = document.getElementById('loading-error');
+
+    function init() {
+      if (hasSidecar) {
+        // Desktop: show loading spinner, Rust sidecar will navigate via window.eval()
+        showLoading();
+      } else {
+        // iOS / remote client: show connect form
+        var saved = localStorage.getItem(STORAGE_KEY);
+        if (saved) {
+          attemptNavigate(saved);
+        } else {
+          urlInput.value = DEFAULT_URL;
+          showForm();
+        }
+      }
+    }
+
+    function showLoading() {
+      loadingView.classList.remove('hidden');
+      formView.classList.add('hidden');
+      connectingView.classList.add('hidden');
+
+      // Safety timeout: if sidecar hasn't navigated us away after 45s, show error
+      desktopTimeout = setTimeout(function() {
+        desktopTimeout = null;
+        loadingError.classList.remove('hidden');
+      }, DESKTOP_TIMEOUT_MS);
+
+      // Cancel desktop timeout if Tauri navigates us away
+      window.addEventListener('beforeunload', function() {
+        if (desktopTimeout) {
+          clearTimeout(desktopTimeout);
+          desktopTimeout = null;
+        }
+      }, { once: true });
+    }
+
+    function connect() {
+      var url = urlInput.value.trim();
+      if (!url) {
+        showError('Please enter a server URL.');
+        return;
+      }
+
+      // Add http:// if no protocol specified
+      if (!/^https?:\/\//i.test(url)) {
+        url = 'http://' + url;
+        urlInput.value = url;
+      }
+
+      // Basic URL validation
+      try {
+        new URL(url);
+      } catch (e) {
+        showError('Invalid URL. Use format: http://hostname:port');
+        return;
+      }
+
+      localStorage.setItem(STORAGE_KEY, url);
+      attemptNavigate(url);
+    }
+
+    function attemptNavigate(url) {
+      showConnecting(url);
+
+      // Safety net: if we're still on this page after the timeout,
+      // navigation failed (server unreachable or blocked by Tauri).
+      // Cancel any stale in-progress load and return to the form.
+      clearSafetyTimeout();
+      safetyTimeout = setTimeout(function() {
+        safetyTimeout = null;
+        window.stop();
+        localStorage.removeItem(STORAGE_KEY);
+        urlInput.value = url;
+        showForm();
+        showError('Could not reach server. Check the URL and try again.');
+      }, CONNECT_TIMEOUT_MS);
+
+      // If navigation succeeds and the page unloads, cancel the safety timeout
+      window.addEventListener('beforeunload', function() {
+        clearSafetyTimeout();
+      }, { once: true });
+
+      // Navigate to the server
+      window.location.replace(url);
+    }
+
+    function cancelConnect() {
+      clearSafetyTimeout();
+      window.stop();
+      localStorage.removeItem(STORAGE_KEY);
+      urlInput.value = DEFAULT_URL;
+      showForm();
+    }
+
+    function clearSafetyTimeout() {
+      if (safetyTimeout) {
+        clearTimeout(safetyTimeout);
+        safetyTimeout = null;
+      }
+    }
+
+    function showForm() {
+      formView.classList.remove('hidden');
+      connectingView.classList.add('hidden');
+      loadingView.classList.add('hidden');
+    }
+
+    function showConnecting(url) {
+      formView.classList.add('hidden');
+      connectingView.classList.remove('hidden');
+      loadingView.classList.add('hidden');
+      connectingUrl.textContent = url;
+    }
+
+    function showError(msg) {
+      errorDiv.textContent = msg;
+      errorDiv.style.display = 'block';
+      setTimeout(function() { errorDiv.style.display = 'none'; }, 4000);
+    }
+
+    // Handle Enter key in input
+    urlInput.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') {
+        connect();
+      }
+    });
+
+    init();
+  </script>
+</body>
+</html>

@@ -1,0 +1,28 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "_comment": "bb-ystl.3 (QD.3): Stryker on Bun via command-runner. Stryker itself runs under Node (bunx stryker invokes it as a Node process). The test-runner subprocess is `bun test` (the project's actual unit-test runner per ADR-2008). Direct bun:test ↔ Stryker integration doesn't exist; the command runner just shells out per mutant and reads the exit code, so no test-API churn is required.",
+
+  "_initialScopeComment": "QD.3 initial scope is intentionally narrow: only the modules covered by sandbox-safe (mock-based or pure) tests. The fixture-based suites (createBdWorkspace tmpdirs, real bd CLI calls) don't survive Stryker's sandbox copy without extra fixture wiring — see docs/quality/2026-04-27/mutation/server-baseline.md for the failure mode. Widening scope is a follow-up bead (see DONE comment on bb-ystl.3). Initial measured score on this scope clears the spec §2 Q1 40% floor by a wide margin (84.62%), so the gate is live and meaningful immediately.",
+
+  "packageManager": "npm",
+  "testRunner": "command",
+  "commandRunner": {
+    "command": "bun test src/handlers/__tests__/console.unit.test.ts"
+  },
+  "mutate": [
+    "src/handlers/console.ts"
+  ],
+  "reporters": ["clear-text", "html", "progress"],
+  "htmlReporter": {
+    "fileName": "mutation-report.html"
+  },
+  "thresholds": {
+    "high": 80,
+    "low": 60,
+    "break": 60
+  },
+  "concurrency": 4,
+  "timeoutMS": 60000,
+  "tempDirName": ".stryker-tmp",
+  "cleanTempDir": true
+}

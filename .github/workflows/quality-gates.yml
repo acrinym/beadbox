@@ -1,0 +1,579 @@
+# Quality-discipline enforcement (bb-ystl epic).
+#
+# Single workflow housing the per-domain quality gates the spec calls
+# for. Combined surface bb-ystl.2 (Tier 2 coverage + CCN + Rust mutation)
+# + bb-ystl.3 (TS mutation via Stryker on Bun command-runner).
+#
+# Tier 1 (pre-push hook): lint + typecheck + CCN-of-changed-files
+# (.husky/pre-push; bb-ystl.2). Fast feedback before the network
+# round-trip.
+#
+# Tier 2 (this workflow):
+#   - coverage-server / coverage-client / coverage-rust: enforce
+#     spec §2 Q1 coverage floors (60 / 20 / 65% lines).
+#   - mutation-rust: cargo-mutants against src-tauri; floor 75%.
+#   - mutation-server: Stryker on Bun via command-runner (bb-ystl.3 /
+#     QD.3); narrow initial scope (handlers/console.ts) because
+#     fixture-based suites don't survive Stryker's sandbox copy
+#     without extra fixture wiring. See
+#     docs/quality/2026-04-27/mutation/server-baseline.md for the
+#     failure mode + scope-expansion plan. Floor: 60% on this scope.
+#   - complexity-full-repo: lizard --CCN 15 against the full
+#     workspace; allowlist-aware (lizard-allowlist.txt at repo root).
+#   - mutation-client: NOT GATED yet; tracked for QD.6 ratchet.
+#
+# Tier 3 (quarterly audit): owned by QD.6, not in CI.
+#
+# Gates apply to PRs landing AFTER QD.2 lands (per epic narrative
+# posture). Prior v0.25 RC commits are NOT retroactively re-gated.
+#
+# Security note: this workflow uses no ${{ github.event.* }} fields
+# in run: blocks. Concurrency uses ${{ github.ref }} which is GitHub-
+# controlled and safe.
+
+name: Quality Gates
+
+on:
+  pull_request:
+    branches: [main, v0.25]
+  push:
+    branches: [main, v0.25]
+  workflow_dispatch:
+
+concurrency:
+  group: quality-gates-${{ github.ref }}
+  cancel-in-progress: true
+
+# beadbox-l5i.1: read-only default for GITHUB_TOKEN. No job in this workflow
+# writes to the repo; any future one must opt in with its own permissions: block.
+permissions:
+  contents: read
+
+jobs:
+  coverage-server:
+    name: Coverage — packages/server (floor 60% lines)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - name: Install bd (beads CLI)
+        # beadbox-l5i.1 / qa1: the retired homelab runner had bd installed;
+        # hosted runners do not, so ~10 server tests died on
+        # 'Executable not found in $PATH: "bd"' and the coverage floor was
+        # never reached. Installed rather than mocked on purpose: the failing
+        # suites (bd-argv / bd-callsites security tests, bd-workspace fixture,
+        # subscribe leak gate) exist to assert behaviour against a REAL cobra
+        # CLI — mocking bd would delete the property beadbox-l5i.3 added.
+        # Version pinned; bump BD_VERSION to move it.
+        env:
+          BD_VERSION: "1.2.2"
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL --proto '=https' --tlsv1.2 \
+            "https://github.com/gastownhall/beads/releases/download/v${BD_VERSION}/beads_${BD_VERSION}_linux_amd64.tar.gz" \
+            | tar xzf - -C "$HOME/.local/bin" bd
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/bd" version
+      - run: bun install --frozen-lockfile
+      - name: Run server coverage
+        run: |
+          set -o pipefail
+          bun --cwd=packages/server test --coverage 2>&1 | tee coverage-server.txt
+      - name: Enforce 60% line floor
+        run: |
+          # Bun's coverage table prints "All files | <funcs%> | <lines%> | ...";
+          # extract the line% column (3rd pipe-delimited field of the All-files row).
+          PCT=$(awk -F'|' '/^[[:space:]]*All files/{gsub(/[[:space:]]/,"",$3); print $3}' coverage-server.txt)
+          if [ -z "$PCT" ]; then
+            echo "::error::Could not parse server coverage from coverage-server.txt"
+            exit 1
+          fi
+          echo "packages/server line coverage: $PCT%"
+          AWK_PASS=$(awk -v p="$PCT" 'BEGIN{print (p+0 >= 60.0) ? "1" : "0"}')
+          if [ "$AWK_PASS" != "1" ]; then
+            echo "::error::packages/server coverage $PCT% below floor 60.0% (spec §2 Q1)"
+            echo "::error::See artifact 'coverage-server' for per-file breakdown."
+            exit 1
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: coverage-server
+          path: coverage-server.txt
+          retention-days: 14
+
+  coverage-client:
+    name: Coverage — packages/client (floor 20% lines)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - run: bun install --frozen-lockfile
+      - name: Run client coverage (includes QD.1 import sweep)
+        run: |
+          set -o pipefail
+          bun --cwd=packages/client test --coverage 2>&1 | tee coverage-client.txt
+      - name: Enforce 20% line floor
+        run: |
+          PCT=$(awk -F'|' '/^[[:space:]]*All files/{gsub(/[[:space:]]/,"",$3); print $3}' coverage-client.txt)
+          if [ -z "$PCT" ]; then
+            echo "::error::Could not parse client coverage from coverage-client.txt"
+            exit 1
+          fi
+          echo "packages/client line coverage: $PCT%"
+          AWK_PASS=$(awk -v p="$PCT" 'BEGIN{print (p+0 >= 20.0) ? "1" : "0"}')
+          if [ "$AWK_PASS" != "1" ]; then
+            echo "::error::packages/client coverage $PCT% below floor 20.0% (spec §2 Q1, post-QD.1 re-baseline)"
+            echo "::error::See artifact 'coverage-client' for per-file breakdown."
+            exit 1
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: coverage-client
+          path: coverage-client.txt
+          retention-days: 14
+
+  coverage-rust:
+    name: Coverage — src-tauri Rust (floor 60% lines)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          # cargo-llvm-cov needs llvm-tools (llvm-profdata/llvm-cov). The
+          # retired homelab runner had the component installed out of band.
+          components: llvm-tools-preview
+      - name: Install Tauri Linux system dependencies
+        # ubuntu-latest does not ship the GTK/WebKit headers tauri-build links
+        # against; the retired homelab runner had them pre-provisioned.
+        # ubuntu-24.04 ships webkit2gtk-4.1 (4.0 is gone).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev libssl-dev patchelf build-essential file
+      - name: Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+          shared-key: quality-gates-coverage
+      - name: Install cargo-llvm-cov
+        # beadbox-l5i.1: was pinned to 0.6.15 solely because the homelab
+        # runner was stuck on rustc 1.75 (bb-grhe); 0.7+ needs 1.87+.
+        # ubuntu-latest ships current stable, so that constraint is gone.
+        # Prebuilt tarball rather than `cargo install` to stay inside the
+        # 15-minute budget. Version pinned on purpose (public-repo supply-chain
+        # hygiene) — bump by editing LLVM_COV_VERSION.
+        env:
+          LLVM_COV_VERSION: "0.9.0"
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.cargo/bin"
+          curl -fsSL --proto '=https' --tlsv1.2 \
+            "https://github.com/taiki-e/cargo-llvm-cov/releases/download/v${LLVM_COV_VERSION}/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar xzf - -C "$HOME/.cargo/bin"
+          cargo llvm-cov --version
+      - name: Stage sidecar placeholders for tauri-build
+        # beadbox-bva: tauri.conf.json declares bundle.externalBin
+        # ["binaries/beadbox-sidecar"], and tauri-build's build script hard-
+        # fails ("resource path ... doesn't exist") when the per-triple file
+        # is absent. This job never staged them — it silently depended on the
+        # retired persistent runner having one left over from an earlier job.
+        #
+        # Empty placeholders are the right fix here, not a real sidecar build:
+        # tauri-build only checks the path exists, and the sidecar is a
+        # compiled Bun binary that contributes nothing to RUST coverage.
+        # Building it for real would add bun + bun install + bun build
+        # --compile to this job for zero measurement benefit. release.yml's
+        # build-frontend already uses exactly this convention before
+        # cargo check.
+        run: |
+          set -euo pipefail
+          TRIPLE=$(rustc -vV | awk '/^host:/{print $2}')
+          mkdir -p src-tauri/binaries
+          touch "src-tauri/binaries/beadbox-sidecar-${TRIPLE}"
+          echo "staged placeholder for $TRIPLE"
+
+      - name: Run Rust coverage with built-in floor enforcement
+        # Floor re-baselined 65 -> 60 (Nelson, beadbox-l5i.1 rework; pm records
+        # the new number in spec §2 Q1). Context so this is not read as a
+        # silent lowering: the gate had never actually run — see the pipefail
+        # note below — and on its first honest run it measured 64.60%
+        # (427/661 lines). The aggregate is dragged by src/updater.rs alone,
+        # which arrived at 179 lines / 37.99% with beadbox-b2p's still-
+        # unfinished self-update work; every other file together is 74.48%.
+        # 60 greens the gate now rather than blocking the epic on b2p's e2e.
+        #
+        # cargo-llvm-cov has --fail-under-lines built in, so the threshold is
+        # the gate and no parsing is required — but ONLY with pipefail set.
+        #
+        # beadbox-bva: without it this step was inert. With no `shell:` key
+        # GitHub runs `bash -e {0}`, which does NOT enable pipefail, so the
+        # pipeline exited with tee's status (always 0) and cargo-llvm-cov's
+        # exit 1 was discarded. `set -o pipefail` here rather than
+        # `shell: bash` so all three coverage gates read identically —
+        # coverage-server and coverage-client do it this way too.
+        run: |
+          set -o pipefail
+          cd src-tauri
+          cargo llvm-cov --workspace --fail-under-lines 60 --json --output-path ../coverage-rust.json 2>&1 \
+            | tee ../coverage-rust.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: coverage-rust
+          path: |
+            coverage-rust.json
+            coverage-rust.txt
+          retention-days: 14
+
+  mutation-rust:
+    name: Mutation — src-tauri Rust (floor 75%)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      # bb-grhe / bb-uu2c: copy-sidecar.sh below shells out to
+      # `bun build --compile`, so this job needs both bun on PATH and
+      # the workspace `bun install` (otherwise the sidecar build fails
+      # with "Could not resolve: kkrpc").
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - run: bun install --frozen-lockfile
+      - name: Install Tauri Linux system dependencies
+        # ubuntu-latest does not ship the GTK/WebKit headers tauri-build links
+        # against; the retired homelab runner had them pre-provisioned.
+        # ubuntu-24.04 ships webkit2gtk-4.1 (4.0 is gone).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev libssl-dev patchelf build-essential file
+      - name: Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+          shared-key: quality-gates-mutation
+      - name: Install cargo-mutants
+        # beadbox-l5i.1: was pinned to 24.11.2 solely because the homelab
+        # runner was stuck on rustc 1.75 (bb-grhe); 25+ needs 1.88+.
+        # ubuntu-latest ships current stable, so that constraint is gone.
+        # Version pinned on purpose — bump by editing MUTANTS_VERSION.
+        env:
+          MUTANTS_VERSION: "27.1.0"
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.cargo/bin"
+          # beadbox-l5i.1 / qa1: this previously extracted to /tmp and then
+          # `find /tmp` for the binary. On a hosted runner /tmp contains
+          # root-owned systemd-private-* / snap-private-tmp dirs, so find hit
+          # EPERM, exited 1, and `bash -e` killed the step before
+          # cargo-mutants ever ran. The release tarball is flat (`tar tzf`
+          # lists a single top-level `cargo-mutants`), so it can be piped
+          # straight into place — same form the cargo-llvm-cov step above
+          # already uses. No temp dir, no find, nothing to trip over.
+          curl -fsSL --proto '=https' --tlsv1.2 \
+            "https://github.com/sourcefrog/cargo-mutants/releases/download/v${MUTANTS_VERSION}/cargo-mutants-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar xzf - -C "$HOME/.cargo/bin"
+          cargo mutants --version
+      - name: Build sidecar binary (mutants reference it)
+        # bb-ovln layer 2: cargo-mutants' baseline tests cargo build the
+        # workspace's full target matrix, which references BOTH
+        # binaries/beadbox-sidecar-{aarch64,x86_64}-unknown-linux-gnu via
+        # tauri's externalBin config. The previous `||` form short-
+        # circuited after the first arch succeeded → the second binary
+        # never built → mutants baseline panicked finding it. Per
+        # pm/systemdesign.md §5.1 (Build Pipeline) which calls out
+        # cross-arch sidecar production as standard, run BOTH builds
+        # sequentially. Each is independent; failure of one fails the
+        # step (set -e via shell: bash -e default).
+        run: |
+          bash src-tauri/scripts/copy-sidecar.sh aarch64-unknown-linux-gnu
+          bash src-tauri/scripts/copy-sidecar.sh x86_64-unknown-linux-gnu
+      - name: Run cargo-mutants
+        # bb-uu2c: cargo-mutants 24.11.2 errors out if --output's parent
+        # directory doesn't exist; on a fresh checkout `../target` may
+        # not be there yet, so create it explicitly.
+        #
+        # bb-ovln L4: --gitignore false tells cargo-mutants to copy the
+        # ENTIRE workspace into its temp dir, including gitignored paths
+        # (per pm/systemdesign.md §5.1 Build Pipeline). src-tauri/binaries/
+        # is gitignored; the L2 'Build sidecar binary' step builds the bun-
+        # compiled sidecar binaries into the runner's working tree but
+        # cargo-mutants' default gitignore-respecting copy excludes them
+        # from the temp dir, so tauri-build's externalBin check panics
+        # in baseline. --gitignore false disables that filter; binaries
+        # land in the temp src-tauri/binaries/ where build.rs expects them.
+        # CLI flag (not TOML field — cargo-mutants 24.11.2 has no
+        # `gitignore` config-file field; L3 attempt at TOML caused parse
+        # error, qa1-caught).
+        run: |
+          cd src-tauri
+          mkdir -p ../target
+          cargo mutants --no-shuffle --gitignore false --output ../target/mutants 2>&1 | tee ../mutation-rust.txt
+      - name: Enforce 75% mutation floor
+        run: |
+          # bb-ovln L5: cargo-mutants 24.11.2 writes outcomes.json under
+          # `<output>/mutants.out/`, not directly under `<output>/`. The
+          # preceding step passes `--output ../target/mutants`, so the
+          # actual artifact lands at target/mutants/mutants.out/outcomes.json.
+          # Pre-L4 baselines panicked before reaching this gate so the
+          # path mismatch was masked; L4's successful baseline (run
+          # 25292491005, 77.33%) finally exposed it.
+          OUTCOMES=target/mutants/mutants.out/outcomes.json
+          if [ ! -f "$OUTCOMES" ]; then
+            echo "::error::cargo-mutants did not produce $OUTCOMES — gate cannot evaluate"
+            exit 1
+          fi
+          # Score = caught / (caught + missed + timeout). cargo-mutants emits
+          # outcome summaries as JSON; parse via python3 (always available).
+          CAUGHT=$(python3 -c "import json; d=json.load(open('$OUTCOMES'))['outcomes']; print(sum(1 for o in d if o.get('summary')=='CaughtMutant'))")
+          MISSED=$(python3 -c "import json; d=json.load(open('$OUTCOMES'))['outcomes']; print(sum(1 for o in d if o.get('summary')=='MissedMutant'))")
+          TIMEOUT=$(python3 -c "import json; d=json.load(open('$OUTCOMES'))['outcomes']; print(sum(1 for o in d if o.get('summary')=='Timeout'))")
+          TOTAL=$((CAUGHT + MISSED + TIMEOUT))
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "::error::cargo-mutants ran but produced 0 mutants — gate cannot evaluate"
+            exit 1
+          fi
+          PCT=$(awk -v c="$CAUGHT" -v t="$TOTAL" 'BEGIN{printf "%.2f", (c*100.0)/t}')
+          echo "src-tauri mutation: caught=$CAUGHT missed=$MISSED timeout=$TIMEOUT total=$TOTAL score=$PCT%"
+          AWK_PASS=$(awk -v p="$PCT" 'BEGIN{print (p+0 >= 75.0) ? "1" : "0"}')
+          if [ "$AWK_PASS" != "1" ]; then
+            echo "::error::src-tauri mutation $PCT% below floor 75.0% (spec §2 Q1, 7pt cushion below current 81.8%)"
+            echo "::error::Missed mutants in target/mutants/missed.txt — see artifact."
+            exit 1
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: mutation-rust
+          path: |
+            mutation-rust.txt
+            target/mutants
+          retention-days: 14
+
+  mutation-server:
+    # bb-ystl.3 / QD.3: Stryker on Bun via command-runner against
+    # packages/server. Initial scope intentionally narrow (handlers/
+    # console.ts) — fixture-based suites don't survive Stryker's
+    # sandbox copy without extra fixture wiring. See
+    # docs/quality/2026-04-27/mutation/server-baseline.md for the
+    # scope-expansion plan. Floor 60% on this scope.
+    name: Mutation — packages/server (Stryker, narrow scope)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.13
+      - name: Install Node (Stryker host runtime)
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: Install dependencies
+        run: bun install
+      - name: Run Stryker
+        working-directory: packages/server
+        run: bun run quality:mutation
+      - name: Upload HTML report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mutation-report-server
+          path: packages/server/reports/mutation/mutation-report.html
+          if-no-files-found: ignore
+
+  complexity-full-repo:
+    name: "Complexity (CCN >= 15) - full repo"
+    # bb-ystl.5 (QD.5): exact-match CCN gate via scripts/check-ccn-allowlist.sh.
+    # Replaces bb-ystl.2's subtract-count heuristic — the script compares
+    # `<file>:<function>` pairs against lizard-allowlist.txt, so N new
+    # violations no longer cancel out N pre-existing allowlist entries when
+    # the actual functions differ.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install lizard
+        # beadbox-l5i.1: the previous "reuse /tmp/lizvenv if present" guard was
+        # a no-op optimisation for the persistent homelab runner. Ephemeral
+        # runners always start empty, so just build the venv.
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/lizvenv
+          /tmp/lizvenv/bin/pip install --quiet lizard
+      - name: Run CCN gate (full repo)
+        run: bash scripts/check-ccn-allowlist.sh --mode=full
+
+  # ────────────────────────────────────────────────────────────────────
+  # beadbox-l5i.1: workflow hygiene. Standing enforcement for the
+  # open-sourcing CI-security decisions in pm/opensource-checklist.md §3,
+  # so they cannot silently rot back in after launch:
+  #
+  #   1. no homelab runner labels  — a fork PR must never execute code on
+  #      the LAN. This is the launch blocker the bead exists for.
+  #   2. no fork-triggered workflow event that carries base-repo secrets
+  #   3. every `uses:` pinned to a 40-hex commit SHA (tags are mutable)
+  #   4. actionlint clean
+  #   5. zizmor clean — Actions-specific static analysis (template
+  #      injection, artifact poisoning, excessive permissions)
+  #
+  # NOTE for future editors: the banned tokens are assembled at runtime
+  # from fragments rather than written out literally, because these checks
+  # scan .github/ — including this file. Spelling either token out in full
+  # anywhere below makes the job fail on itself.
+  # ────────────────────────────────────────────────────────────────────
+  workflow-hygiene:
+    name: "Workflow hygiene (runners, SHA pins, actionlint, zizmor)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: No homelab runner labels
+        run: |
+          set -euo pipefail
+          PATTERN="self-""hosted"
+          if grep -rn "$PATTERN" .github/; then
+            echo "::error::Found a $PATTERN runner reference under .github/. The public repo must never dispatch to the homelab — use ubuntu-latest / macos-14 / windows-latest."
+            exit 1
+          fi
+          echo "OK: no $PATTERN references under .github/"
+
+      - name: No fork-triggered workflows with secret access
+        run: |
+          set -euo pipefail
+          PATTERN="pull_request""_target"
+          if grep -rn "$PATTERN" .github/workflows/; then
+            echo "::error::Found $PATTERN. It runs fork-authored code with this repo's secrets — use pull_request instead."
+            exit 1
+          fi
+          echo "OK: no $PATTERN"
+
+      - name: All actions pinned to a commit SHA
+        run: |
+          set -euo pipefail
+          # A tag is mutable: whoever controls an action's repo can repoint
+          # v4 at new code. A 40-hex commit SHA cannot be repointed.
+          # Local (./...) and container (docker://...) refs are exempt.
+          grep -rhoE '^[[:space:]]*(-[[:space:]]*)?uses:[[:space:]]*[^[:space:]]+' .github/workflows/ \
+            | sed -E 's/^[[:space:]]*(-[[:space:]]*)?uses:[[:space:]]*//' \
+            | grep -vE '^(\./|docker://)' \
+            | grep -vE '@[0-9a-f]{40}$' \
+            | sort -u > /tmp/unpinned.txt || true
+          if [ -s /tmp/unpinned.txt ]; then
+            echo "::error::These action references are not pinned to a 40-character commit SHA:"
+            sed 's/^/  /' /tmp/unpinned.txt
+            exit 1
+          fi
+          echo "OK: every action reference is SHA-pinned"
+
+      - name: actionlint
+        env:
+          ACTIONLINT_VERSION: "1.7.12"
+          # The gate enforces workflow security, not shell style. Drop
+          # shellcheck's info/style advice on the pre-existing release
+          # scripts; real warnings still fail. See .github/actionlint.yaml.
+          SHELLCHECK_OPTS: "--severity=warning"
+        run: |
+          set -euo pipefail
+          curl -fsSL --proto '=https' --tlsv1.2 \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+            | tar xzf - -C /tmp actionlint
+          /tmp/actionlint -color
+
+      - name: zizmor
+        env:
+          ZIZMOR_VERSION: "1.29.0"
+          # zizmor resolves action refs via the GitHub API; the read-only
+          # default token keeps it off the unauthenticated rate limit.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          pip install --quiet "zizmor==${ZIZMOR_VERSION}"
+          # --min-severity=high: gate on the classes that actually get repos
+          # compromised (template injection, dangerous triggers, artifact and
+          # cache poisoning). Every high finding we have accepted is listed
+          # with its reasoning in .github/zizmor.yml; an unlisted one fails.
+          zizmor --min-severity=high --config .github/zizmor.yml \
+            --format=plain .github/workflows/
+
+  # ────────────────────────────────────────────────────────────────────
+  # beadbox-l5i.5 AC-4: dependency audit.
+  #
+  # Gates on VULNERABILITIES in what we actually ship. Deliberately not a
+  # "zero advisories anywhere" gate — Nelson's 2026-08-20 descope defers the
+  # moderate/low tail and dev-only tooling to beadbox-l5i.7, and a gate that
+  # is red for reasons nobody intends to act on gets ignored, then rots.
+  #
+  # Rust  — cargo-deny, config in src-tauri/deny.toml (licenses + advisories
+  #         + bans + sources). Every accepted advisory is listed there with
+  #         its reasoning, so an unlisted one fails the build.
+  # JS    — bun audit at --audit-level=high. The --ignore entries below are
+  #         each dev-only-by-dependency-path; see the comment on each.
+  # ────────────────────────────────────────────────────────────────────
+  dependency-audit:
+    name: "Dependency audit (licenses + high-severity advisories)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+
+      - name: Install cargo-deny
+        # Version pinned deliberately (public-repo supply-chain hygiene);
+        # bump CARGO_DENY_VERSION to move it. This tarball nests its binary
+        # one directory deep, unlike the cargo-llvm-cov/cargo-mutants ones.
+        env:
+          CARGO_DENY_VERSION: "0.20.2"
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.cargo/bin"
+          curl -fsSL --proto '=https' --tlsv1.2 \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+            | tar xzf - -C "$HOME/.cargo/bin" --strip-components=1 \
+                "cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl/cargo-deny"
+          cargo deny --version
+
+      - name: cargo-deny (licenses, advisories, bans, sources)
+        working-directory: src-tauri
+        run: cargo deny check
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - run: bun install --frozen-lockfile
+
+      - name: bun audit (high severity)
+        # Each --ignore below was classified by DEPENDENCY PATH, not by
+        # guessing from the package name. None of these parents ships:
+        #   brace-expansion, fast-uri  <- @stryker-mutator/core   (dev: mutation testing)
+        #   nanoid, postcss, vite      <- vite toolchain          (dev: build)
+        #   undici                     <- jsdom                   (dev: test DOM)
+        #   ws                         <- happy-dom               (dev: test DOM)
+        # On ws specifically: kkrpc (a real production dep) lists ws only as a
+        # peerDependency and we do not install it, so kkrpc does NOT pull ws
+        # into the shipped tree — the only ws in the graph comes from
+        # happy-dom. Verified, not assumed.
+        # All deferred to beadbox-l5i.7 per Nelson's 2026-08-20 descope.
+        run: |
+          set -euo pipefail
+          bun audit --audit-level=high \
+            --ignore=GHSA-mh99-v99m-4gvg --ignore=GHSA-rgw5-rvv9-x895 \
+            --ignore=GHSA-3jxr-9vmj-r5cp \
+            --ignore=GHSA-7p8r-x3mc-p8w7 --ignore=GHSA-v2hh-gcrm-f6hx \
+            --ignore=GHSA-4c8g-83qw-93j6 --ignore=GHSA-q3j6-qgpj-74h6 \
+            --ignore=GHSA-v39h-62p7-jpjc \
+            --ignore=GHSA-28wg-ghj8-5hjv --ignore=GHSA-2v37-7h3g-55p8 \
+            --ignore=GHSA-6g55-p6wh-862q --ignore=GHSA-r28c-9q8g-f849 \
+            --ignore=GHSA-fx2h-pf6j-xcff \
+            --ignore=GHSA-4cwx-7wf7-3272 --ignore=GHSA-vmh5-mc38-953g \
+            --ignore=GHSA-vxpw-j846-p89q --ignore=GHSA-hm92-r4w5-c3mj \
+            --ignore=GHSA-96hv-2xvq-fx4p

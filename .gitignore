@@ -1,0 +1,82 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+
+# production
+/build
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files
+.env*
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+.DS_Store
+.beads/
+dist/
+CLAUDE.md
+
+# Tauri
+src-tauri/target/
+src-tauri/binaries/
+src-tauri/gen/
+
+# cargo-mutants output (ephemeral mutation-test scratch dirs)
+src-tauri/mutants.out/
+src-tauri/mutants.out.old/
+
+# Next.js (legacy build leftover; the migration to Vite removed Next.js
+# entirely in P6.1/P6.2 but local working trees may still carry the
+# pre-migration .next/ output. Ignored defensively against accidental
+# re-add. Recursive so nested e.g. packages/client/.next/ also caught.)
+.next/
+
+# Playwright
+/test-results/
+/playwright-report/
+/playwright-report-holistic/
+/blob-report/
+/playwright/.cache/
+/e2e/.test-beads/
+
+# Dolt database files (added by bd init)
+.dolt/
+*.db
+
+# bb-ystl.3 (QD.3): Stryker temp + report artifacts
+.stryker-tmp/
+mutation-report.html
+reports/mutation/
+
+# LaTeX build artifacts (e.g. pmm/acquisition-channels.* from pdflatex runs).
+# Source files (.tex, .bib) are NOT ignored. *.log deliberately omitted —
+# repo has tracked shell-script audit logs (docs/quality/.../leverage.log).
+# *.out re-includes cargo-mutants report dirs (docs/quality/**/mutants.out/).
+*.aux
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.toc
+*.out
+!**/mutants.out/
+!**/mutants.out/**
+
+# bb-i0fj: stale spike-branch worktree directories. Leftover from
+# spike/bun-migration-tb0 development era. Self-hosted runners persist
+# their workspace; if dirty `tb0/` files survive a branch checkout,
+# actions/checkout's `clean: true` warns and silently degrades
+# (rc.8 build-macos-arm64 hit this — bun install couldn't find
+# package.json because checkout left the workspace half-materialized).
+/tb0/
+
+# bb-ystl.4 (QD.4): root-level coverage/ artifacts from vitest --coverage runs
+/coverage/

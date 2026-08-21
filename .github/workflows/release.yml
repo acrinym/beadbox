@@ -1,0 +1,1516 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to rebuild (e.g., v0.6.4 or v0.6.4-rc.7)"
+        required: true
+        type: string
+      build_macos_arm64:
+        description: "Build macOS ARM64"
+        type: boolean
+        default: true
+      build_linux:
+        description: "Build Linux"
+        type: boolean
+        default: true
+      build_windows:
+        description: "Build Windows"
+        type: boolean
+        default: true
+
+concurrency:
+  group: release
+  cancel-in-progress: true
+
+env:
+  RUST_BACKTRACE: 1
+  HUSKY: "0"
+  # Normalize tag name across push and workflow_dispatch triggers
+  RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+# beadbox-l5i.1: read-only default for GITHUB_TOKEN; the jobs that create
+# tags, draft releases, or upload assets opt up with their own permissions:.
+permissions:
+  contents: read
+
+jobs:
+  # ── Guard: skip full rebuild if promote-release.yml already published this tag ──
+  check-promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    permissions:
+      contents: read
+    outputs:
+      skip_build: ${{ steps.check.outputs.skip_build }}
+    steps:
+      - name: Check if promoted release already exists
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Manual workflow_dispatch always builds (user explicitly requested it)
+          if [ "${{ github.event_name }}" != "push" ]; then
+            echo "Manual dispatch - proceeding with build"
+            echo "skip_build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          TAG="${RELEASE_TAG}"
+
+          # Check if a published (non-draft) release already exists for this tag
+          RELEASE_JSON=$(gh release view "$TAG" --repo "${{ github.repository }}" --json isDraft,assets 2>/dev/null || echo "")
+
+          if [ -z "$RELEASE_JSON" ]; then
+            echo "No existing release for $TAG - proceeding with build"
+            echo "skip_build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          IS_DRAFT=$(echo "$RELEASE_JSON" | jq -r '.isDraft')
+          if [ "$IS_DRAFT" = "true" ]; then
+            echo "Release for $TAG is a draft - proceeding with build"
+            echo "skip_build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Published release exists. Verify all 3 expected artifacts are present
+          # before skipping (handles partial promote failures gracefully).
+          # AppImage dropped in v0.25 (bb-ak1x) — Tauri's patchelf step
+          # corrupts the Bun static sidecar; restoration deferred to v0.26.
+          for pattern in "macOS-arm64.dmg" "Linux_amd64.deb" "Windows-x64-setup.exe"; do
+            if ! echo "$RELEASE_JSON" | jq -e ".assets[] | select(.name | contains(\"$pattern\"))" > /dev/null 2>&1; then
+              echo "Missing artifact matching '$pattern' - proceeding with build"
+              echo "skip_build=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+
+          echo "Published release with all 3 artifacts found for $TAG"
+          echo "Skipping build - release was already created via promote-release.yml"
+          echo "skip_build=true" >> "$GITHUB_OUTPUT"
+
+  # ── Gate: lint, type-check, cargo check ──
+  build-frontend:
+    if: needs.check-promote.outputs.skip_build != 'true'
+    needs: [check-promote]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+
+      - name: Install Tauri Linux system dependencies
+        # ubuntu-latest does not ship the GTK/WebKit headers tauri-build links
+        # against; the retired homelab runner had them pre-provisioned.
+        # ubuntu-24.04 ships webkit2gtk-4.1 (4.0 is gone).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev libssl-dev patchelf build-essential file
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Type check
+        # bb-mnt3 removed the root tsconfig.json post-monorepo migration;
+        # run typecheck per-package to mirror Quality Gates.
+        run: |
+          bun --cwd=packages/client run typecheck
+          bun --cwd=packages/server run typecheck
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+          shared-key: linux-x64
+
+      - name: Cargo check (Linux smoke test)
+        run: |
+          mkdir -p packages/client/dist
+          mkdir -p src-tauri/binaries
+          # P5.2 renamed externalBin from node-sidecar to beadbox-sidecar.
+          # Cargo check needs the per-target files to exist to satisfy
+          # Tauri's externalBin resolution under the new naming convention.
+          touch src-tauri/binaries/beadbox-sidecar-x86_64-unknown-linux-gnu
+          touch src-tauri/binaries/beadbox-sidecar-x86_64-pc-windows-msvc.exe
+          cargo check --release --manifest-path src-tauri/Cargo.toml
+
+  test:
+    if: needs.check-promote.outputs.skip_build != 'true'
+    needs: [check-promote]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Unit tests
+        run: bun run test
+
+  test-integration:
+    if: needs.check-promote.outputs.skip_build != 'true'
+    needs: [check-promote]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Build SPA
+        run: bun --cwd=packages/client run build
+      - name: Integration tests
+        run: bun run test:integration
+
+  # ── Create draft release for build jobs to upload into ──
+  create-draft:
+    if: needs.check-promote.outputs.skip_build != 'true'
+    needs: [check-promote]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: write
+    steps:
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${RELEASE_TAG}"
+          PRERELEASE_FLAG=""
+          if [[ "$TAG" == *"-rc"* ]]; then PRERELEASE_FLAG="--prerelease"; fi
+
+          # Create draft release if it doesn't already exist
+          gh release view "$TAG" --repo "${{ github.repository }}" > /dev/null 2>&1 \
+            || gh release create "$TAG" --draft $PRERELEASE_FLAG \
+              --title "$TAG" --notes "Release ${TAG#v}" \
+              --repo "${{ github.repository }}"
+
+  # ── Platform builds (each builds frontend inline, uploads to draft release) ──
+
+  build-macos-arm64:
+    if: github.event_name == 'push' || inputs.build_macos_arm64
+    needs: [build-frontend, create-draft]
+    runs-on: macos-14
+    timeout-minutes: 45
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          RAW="${RELEASE_TAG#v}"
+          echo "version=${RAW%%-rc.*}" >> "$GITHUB_OUTPUT"
+          echo "build_tag=${RAW}" >> "$GITHUB_OUTPUT"
+          echo "build_id=${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+
+      - name: Install dependencies and stage Bun sidecar
+        run: |
+          bun install --frozen-lockfile
+          bash src-tauri/scripts/copy-sidecar.sh aarch64-apple-darwin
+
+      - name: Build SPA
+        env:
+          VITE_APP_VERSION: ${{ steps.version.outputs.version }}
+          VITE_BUILD_TAG: ${{ steps.version.outputs.build_tag }}
+          VITE_BUILD_ID: ${{ steps.version.outputs.build_id }}
+          VITE_POSTHOG_KEY: ${{ secrets.NEXT_PUBLIC_POSTHOG_KEY }}
+          VITE_POSTHOG_HOST: ${{ secrets.NEXT_PUBLIC_POSTHOG_HOST }}
+          # bb-xhf6: also expose under the legacy NEXT_PUBLIC_* names so any
+          # subprocess that still reads them (vestigial Next.js plugins,
+          # transitive deps) gets the same value. Pure additive — Vite reads
+          # only VITE_*; this is belt-and-suspenders.
+          NEXT_PUBLIC_POSTHOG_KEY: ${{ secrets.NEXT_PUBLIC_POSTHOG_KEY }}
+          NEXT_PUBLIC_POSTHOG_HOST: ${{ secrets.NEXT_PUBLIC_POSTHOG_HOST }}
+          POSTHOG_PERSONAL_API_KEY: ${{ secrets.POSTHOG_PERSONAL_API_KEY }}
+          POSTHOG_ENV_ID: ${{ secrets.POSTHOG_ENV_ID }}
+        run: bun --cwd=packages/client run build
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+          shared-key: macos-arm64
+
+      - name: Import signing certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          CERT_PATH="$RUNNER_TEMP/certificate.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
+
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$CERT_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          # Word splitting is intended: the substitution yields the existing
+          # keychain paths as separate arguments to append to the search list.
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+
+          rm "$CERT_PATH"
+
+      - name: Materialize Apple API key
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+        run: |
+          # GitHub-hosted runners have no ~/.appstoreconnect; materialize the
+          # notarization .p8 from a secret. Robust to both raw-PEM and base64
+          # secret storage; tries APPLE_API_KEY_P8 then APPLE_API_KEY_CONTENT.
+          mkdir -p private_keys
+          # beadbox-l5i.2: the Key ID comes from a secret rather than being
+          # inlined. Fail loudly if it is unset — an empty value would build
+          # "AuthKey_.p8" and surface much later as an opaque notarization
+          # error.
+          : "${APPLE_API_KEY_ID:?APPLE_API_KEY_ID secret is not set}"
+          KEY="private_keys/AuthKey_${APPLE_API_KEY_ID}.p8"
+          write_key() {
+            printf '%s' "$1" | grep -q "BEGIN PRIVATE KEY" && { printf '%s\n' "$1" > "$KEY"; } || { printf '%s' "$1" | base64 --decode > "$KEY" 2>/dev/null || return 1; }
+            grep -q "BEGIN PRIVATE KEY" "$KEY"
+          }
+          write_key "$APPLE_API_KEY_P8" || write_key "$APPLE_API_KEY_CONTENT" || { echo "::error::could not materialize a valid .p8 from APPLE_API_KEY_P8 or APPLE_API_KEY_CONTENT"; exit 1; }
+          echo "Materialized $(wc -c < "$KEY" | tr -d ' ') byte .p8"
+
+      - name: Build .app, sign, and notarize
+        env:
+          APPLE_SIGNING_IDENTITY: "Developer ID Application: Nelson Melo Rodriguez (K7Z8YKVA8G)"
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_PATH: ${{ github.workspace }}/private_keys/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8
+          RUST_LOG: tauri_bundler=debug
+          # tauri-plugin-updater signing: when this is set, the bundler also
+          # emits <artifact>.tar.gz + .sig for self-update verification.
+          # Pubkey baked into tauri.conf.json plugins.updater.pubkey.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          bunx tauri build --bundles app --config '{"build":{"beforeBuildCommand":"true"},"version":"'"$VERSION"'"}'
+
+      - name: Locate build output
+        id: paths
+        run: echo "bundle_dir=src-tauri/target/release/bundle" >> "$GITHUB_OUTPUT"
+
+      - name: Verify signing
+        run: |
+          APP="${{ steps.paths.outputs.bundle_dir }}/macos/Beadbox.app"
+          CODESIGN_OUT=$(codesign --display --verbose=2 "$APP" 2>&1) || true
+          echo "$CODESIGN_OUT"
+          echo "$CODESIGN_OUT" | grep -q "Developer ID Application" || { echo "::error::Signing verification failed"; exit 1; }
+          STAPLER_OUT=$(xcrun stapler validate "$APP" 2>&1) || true
+          echo "$STAPLER_OUT"
+          echo "$STAPLER_OUT" | grep -q "worked" || { echo "::error::Staple verification failed"; exit 1; }
+
+      - name: Package signed app for transfer
+        run: |
+          APP="${{ steps.paths.outputs.bundle_dir }}/macos/Beadbox.app"
+          tar -czf Beadbox-app-arm64.tar.gz -C "$(dirname "$APP")" "$(basename "$APP")"
+
+      - name: Restore keychain search list
+        if: always()
+        run: security list-keychains -d user -s ~/Library/Keychains/login.keychain-db
+
+      - name: Upload .app to draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${RELEASE_TAG}" Beadbox-app-arm64.tar.gz \
+            --clobber --repo "${{ github.repository }}"
+
+      - name: Upload updater bundle + signature (macOS arm64)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # tauri-plugin-updater bundle: bundler emits Beadbox.app.tar.gz
+          # + .sig when TAURI_SIGNING_PRIVATE_KEY is set. Rename to embed
+          # arch (avoids collision with x86_64 bundler output on the
+          # publish-update-manifest job that downloads both). Signature
+          # signs the file content, not the filename -- rename is safe.
+          BUNDLE="src-tauri/target/release/bundle/macos/Beadbox.app.tar.gz"
+          if [ ! -f "$BUNDLE" ] || [ ! -f "${BUNDLE}.sig" ]; then
+            echo "::warning::expected $BUNDLE + .sig not found; updater artifacts not uploaded"
+            ls -la src-tauri/target/release/bundle/macos/ || true
+            exit 0
+          fi
+          cp "$BUNDLE"        "Beadbox_aarch64.app.tar.gz"
+          cp "${BUNDLE}.sig"  "Beadbox_aarch64.app.tar.gz.sig"
+          gh release upload "${RELEASE_TAG}" \
+            "Beadbox_aarch64.app.tar.gz" "Beadbox_aarch64.app.tar.gz.sig" \
+            --clobber --repo "${{ github.repository }}"
+
+  create-arm64-dmg:
+    if: github.event_name == 'push' || inputs.build_macos_arm64
+    needs: [build-macos-arm64]
+    runs-on: macos-14
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.artifact.outputs.sha }}
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          RAW="${RELEASE_TAG#v}"
+          echo "version=${RAW%%-rc.*}" >> "$GITHUB_OUTPUT"
+
+      - name: Download signed app from draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "${RELEASE_TAG}" --pattern "Beadbox-app-arm64.tar.gz" \
+            --repo "${{ github.repository }}"
+          tar -xzf Beadbox-app-arm64.tar.gz
+
+      - name: Create DMG
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          STAGING=$(mktemp -d)
+          cp -R Beadbox.app "$STAGING/"
+          ln -s /Applications "$STAGING/Applications"
+
+          hdiutil create -volname "Beadbox" -srcfolder "$STAGING" \
+            -ov -format UDZO -imagekey zlib-level=9 \
+            "Beadbox_${VERSION}_aarch64.dmg"
+          rm -rf "$STAGING"
+
+      - name: Fix DMG Applications icon
+        continue-on-error: true
+        run: |
+          DMG_SRC=$(ls Beadbox_*_aarch64.dmg | head -1)
+          bash scripts/fix-dmg-dsstore.sh "$DMG_SRC"
+
+      - name: Prepare release artifact
+        id: artifact
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          DMG_SRC=$(ls Beadbox_*_aarch64.dmg | head -1)
+          DMG_NAME="Beadbox-${VERSION}-macOS-arm64.dmg"
+          mv "$DMG_SRC" "$DMG_NAME"
+          SHA=$(shasum -a 256 "$DMG_NAME" | cut -d' ' -f1)
+          echo "dmg=$DMG_NAME" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      # bb-hc8c: sign + notarize + staple the DMG itself. Without this, an
+      # unsigned DMG attaches com.apple.quarantine to its contents on copy,
+      # SIP refuses removal under /Applications, and Gatekeeper translocates
+      # the app to a randomized read-only temp dir on every launch. Sign +
+      # notarize + staple the DMG so Gatekeeper recognizes it as trusted and
+      # the contained .app installs to /Applications cleanly.
+      #
+      # Order matters: signing must run AFTER fix-dmg-dsstore.sh (which
+      # mutates DMG content) — otherwise the signature is invalidated.
+      - name: Import signing certificate (for DMG)
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          # Generate an ephemeral keychain password (no KEYCHAIN_PASSWORD secret
+          # exists; on hosted runners the keychain is per-job/throwaway anyway).
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
+          CERT_PATH="$RUNNER_TEMP/dmg-cert.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/dmg-signing.keychain-db"
+          echo -n "$APPLE_CERTIFICATE" | base64 --decode > "$CERT_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          # Word splitting is intended: the substitution yields the existing
+          # keychain paths as separate arguments to append to the search list.
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+          rm "$CERT_PATH"
+
+      - name: Materialize Apple API key (for DMG notarization)
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+        run: |
+          mkdir -p private_keys
+          # beadbox-l5i.2: the Key ID comes from a secret rather than being
+          # inlined. Fail loudly if it is unset — an empty value would build
+          # "AuthKey_.p8" and surface much later as an opaque notarization
+          # error.
+          : "${APPLE_API_KEY_ID:?APPLE_API_KEY_ID secret is not set}"
+          KEY="private_keys/AuthKey_${APPLE_API_KEY_ID}.p8"
+          write_key() {
+            printf '%s' "$1" | grep -q "BEGIN PRIVATE KEY" && { printf '%s\n' "$1" > "$KEY"; } || { printf '%s' "$1" | base64 --decode > "$KEY" 2>/dev/null || return 1; }
+            grep -q "BEGIN PRIVATE KEY" "$KEY"
+          }
+          write_key "$APPLE_API_KEY_P8" || write_key "$APPLE_API_KEY_CONTENT" || { echo "::error::could not materialize a valid .p8 from APPLE_API_KEY_P8 or APPLE_API_KEY_CONTENT"; exit 1; }
+
+      - name: Sign, notarize, and staple DMG
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_PATH: ${{ github.workspace }}/private_keys/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8
+        run: |
+          DMG="${{ steps.artifact.outputs.dmg }}"
+          codesign --force --timestamp \
+            --sign "Developer ID Application: Nelson Melo Rodriguez (K7Z8YKVA8G)" \
+            "$DMG"
+          codesign --verify --verbose=2 "$DMG"
+          xcrun notarytool submit "$DMG" \
+            --key "$APPLE_API_KEY_PATH" \
+            --key-id "$APPLE_API_KEY" \
+            --issuer "$APPLE_API_ISSUER" \
+            --wait
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+          spctl --assess --type open --context context:primary-signature -vvv "$DMG"
+
+      - name: Restore keychain search list
+        if: always()
+        run: security list-keychains -d user -s ~/Library/Keychains/login.keychain-db
+
+      - name: Upload DMG to draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${RELEASE_TAG}" "${{ steps.artifact.outputs.dmg }}" \
+            --clobber --repo "${{ github.repository }}"
+
+  cleanup-arm64-tarball:
+    if: (github.event_name == 'push' || inputs.build_macos_arm64) && success()
+    needs: [create-arm64-dmg]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+
+    steps:
+      - name: Remove intermediate .app.tar.gz from release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete-asset "${RELEASE_TAG}" Beadbox-app-arm64.tar.gz \
+            --yes --repo "${{ github.repository }}" || true
+
+  build-linux:
+    if: github.event_name == 'push' || inputs.build_linux
+    needs: [build-frontend, create-draft]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+
+      - name: Install Tauri Linux system dependencies
+        # ubuntu-latest does not ship the GTK/WebKit headers tauri-build links
+        # against; the retired homelab runner had them pre-provisioned.
+        # ubuntu-24.04 ships webkit2gtk-4.1 (4.0 is gone).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev libssl-dev patchelf build-essential file
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          RAW="${RELEASE_TAG#v}"
+          echo "version=${RAW%%-rc.*}" >> "$GITHUB_OUTPUT"
+          echo "build_tag=${RAW}" >> "$GITHUB_OUTPUT"
+          echo "build_id=${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+          shared-key: linux-x64
+
+      - name: Install dependencies and stage Bun sidecar
+        run: |
+          bun install --frozen-lockfile
+          bash src-tauri/scripts/copy-sidecar.sh x86_64-unknown-linux-gnu
+
+      - name: Build SPA
+        env:
+          VITE_APP_VERSION: ${{ steps.version.outputs.version }}
+          VITE_BUILD_TAG: ${{ steps.version.outputs.build_tag }}
+          VITE_BUILD_ID: ${{ steps.version.outputs.build_id }}
+          VITE_POSTHOG_KEY: ${{ secrets.NEXT_PUBLIC_POSTHOG_KEY }}
+          VITE_POSTHOG_HOST: ${{ secrets.NEXT_PUBLIC_POSTHOG_HOST }}
+          # bb-xhf6: also expose under the legacy NEXT_PUBLIC_* names so any
+          # subprocess that still reads them (vestigial Next.js plugins,
+          # transitive deps) gets the same value. Pure additive — Vite reads
+          # only VITE_*; this is belt-and-suspenders.
+          NEXT_PUBLIC_POSTHOG_KEY: ${{ secrets.NEXT_PUBLIC_POSTHOG_KEY }}
+          NEXT_PUBLIC_POSTHOG_HOST: ${{ secrets.NEXT_PUBLIC_POSTHOG_HOST }}
+          POSTHOG_PERSONAL_API_KEY: ${{ secrets.POSTHOG_PERSONAL_API_KEY }}
+          POSTHOG_ENV_ID: ${{ secrets.POSTHOG_ENV_ID }}
+        run: bun --cwd=packages/client run build
+
+      - name: Build Tauri app
+        env:
+          # tauri-plugin-updater signing for the Linux artifact (AppImage/deb).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          bunx tauri build --config '{"build":{"beforeBuildCommand":"true"},"version":"'"$VERSION"'"}'
+
+      - name: Prepare release artifacts
+        id: artifact
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          DEB_SRC=$(ls src-tauri/target/release/bundle/deb/*.deb | head -1)
+          DEB_NAME="beadbox_${VERSION}_Linux_amd64.deb"
+          cp "$DEB_SRC" "$DEB_NAME"
+          echo "deb=$DEB_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${RELEASE_TAG}" \
+            "${{ steps.artifact.outputs.deb }}" \
+            --clobber --repo "${{ github.repository }}"
+
+      - name: Upload updater bundle + signature (Linux x86_64)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Linux updater bundle: bundler may emit either AppImage.tar.gz
+          # or deb (depending on configured targets) + .sig. Find whichever
+          # exists; rename to a stable platform-keyed name for latest.json.
+          BUNDLE_DIR="src-tauri/target/release/bundle"
+          UPLOADED=0
+          for candidate in "${BUNDLE_DIR}/appimage"/*.AppImage.tar.gz "${BUNDLE_DIR}/deb"/*.deb; do
+            [ -e "$candidate" ] || continue
+            sig="${candidate}.sig"
+            if [ ! -f "$sig" ]; then continue; fi
+            # name: Beadbox_x86_64.<ext> (ext preserved for bundler-format clarity)
+            ext="${candidate#*.}"           # AppImage.tar.gz or deb
+            base="Beadbox_x86_64.${ext}"
+            cp "$candidate" "$base"
+            cp "$sig"       "${base}.sig"
+            gh release upload "${RELEASE_TAG}" "$base" "${base}.sig" \
+              --clobber --repo "${{ github.repository }}"
+            UPLOADED=$((UPLOADED + 1))
+          done
+          if [ $UPLOADED -eq 0 ]; then
+            echo "::warning::no Linux updater bundle + .sig found in $BUNDLE_DIR"
+            find "$BUNDLE_DIR" -type f \( -name "*.sig" -o -name "*.tar.gz" -o -name "*.AppImage" -o -name "*.deb" \) | head -10
+          fi
+
+  build-windows:
+    # beadbox-l5i.1: renamed from build-windows-selfhosted — this now runs on
+    # GitHub-hosted windows-latest. The Bun Win32 CWD trap (bb-m4h2) handling
+    # below is retained: it is a Bun-on-Windows behaviour, not a runner one.
+    if: github.event_name == 'push' || inputs.build_windows
+    needs: [build-frontend, create-draft]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Extract version from tag
+        id: version
+        shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
+        run: |
+          $RAW = $env:RELEASE_TAG -replace '^v', ''
+          $VERSION = $RAW -replace '-rc\.\d+$', ''
+          "version=$VERSION" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "build_tag=$RAW" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "build_id=${{ github.run_number }}" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Ensure tools are in PATH
+        shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
+        run: |
+          # GitHub-hosted windows-latest: Git, gh, Rust (rustup), and the
+          # Windows SDK are preinstalled on PATH. Tauri downloads its own
+          # NSIS. The prior homelab-runner block redirected CARGO_HOME/RUSTUP_HOME/
+          # APPDATA to a service account that does not exist on hosted
+          # runners — those overrides are removed. setup-bun installs into a
+          # workspace-local BUN_INSTALL below; keep that dir explicit.
+          "BUN_INSTALL=$env:RUNNER_TEMP\bun" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      # Windows EPERM workaround (bb-ou7l): oven-sh/setup-bun@v2 ignores
+      # BUN_INSTALL on Windows and installs into NetworkService's profile,
+      # which fails with EPERM when creating its launcher symlink. The
+      # POSIX jobs above still use the action — only Windows needs this
+      # manual install path. When the upstream action honors BUN_INSTALL,
+      # this step collapses back to `- uses: oven-sh/setup-bun@v2`.
+      - name: Install Bun manually (Windows EPERM workaround)
+        shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
+        run: |
+          $ErrorActionPreference = "Stop"
+          $bunDir = "$env:BUN_INSTALL\bin"
+          New-Item -ItemType Directory -Path $bunDir -Force | Out-Null
+          $zipPath = "$env:RUNNER_TEMP\bun-windows-x64.zip"
+          $extractRoot = "$env:RUNNER_TEMP\bun-extract"
+          if (Test-Path $extractRoot) { Remove-Item -Recurse -Force $extractRoot }
+          Invoke-WebRequest -Uri "https://github.com/oven-sh/bun/releases/latest/download/bun-windows-x64.zip" -OutFile $zipPath
+          Expand-Archive -Path $zipPath -DestinationPath $extractRoot -Force
+          $bunExe = Get-ChildItem -Path $extractRoot -Recurse -Filter "bun.exe" | Select-Object -First 1
+          if (-not $bunExe) { throw "bun.exe not found in extracted zip" }
+          Copy-Item -Path $bunExe.FullName -Destination "$bunDir\bun.exe" -Force
+          "$bunDir" | Out-File -FilePath $env:GITHUB_PATH -Append
+          & "$bunDir\bun.exe" --version
+
+      - name: Verify PATH
+        # PowerShell rather than bash: the rest of this job (signing, NSIS,
+        # artifact upload) is PowerShell, so the whole job speaks one shell.
+        shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
+        run: |
+          Write-Host "PATH=$env:PATH"
+          $bun = Get-Command bun -ErrorAction SilentlyContinue
+          if ($bun) { Write-Host "bun OK ($($bun.Path))" } else { Write-Host "bun NOT FOUND" }
+          $cargo = Get-Command cargo -ErrorAction SilentlyContinue
+          if ($cargo) { cargo --version; Write-Host "cargo OK" } else { Write-Host "cargo NOT FOUND" }
+          $gh = Get-Command gh -ErrorAction SilentlyContinue
+          if ($gh) { Write-Host "gh OK ($($gh.Path))" } else { Write-Host "gh NOT FOUND" }
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+          shared-key: windows-x64
+
+      - name: Install dependencies and stage Bun sidecar
+        # bb-mhh1.6: PowerShell shell so Set-Location actually changes the
+        # Win32 process CWD (qa4 evidence on bb-m4h2 CI run 24957627623
+        # proved Git Bash's POSIX chdir does NOT propagate to Win32, so
+        # bun.exe's GetCurrentDirectory() couldn't find package.json under
+        # the prior `shell: bash` + `cd "$GITHUB_WORKSPACE"` form). Belt-
+        # and-suspenders: also pass explicit `--cwd $env:GITHUB_WORKSPACE`
+        # to bun install so the lookup is independent of the inherited
+        # Win32 CWD; bash-spawned `copy-sidecar.sh` inherits the
+        # PowerShell-set Win32 CWD too.
+        shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
+        run: |
+          Set-Location $env:GITHUB_WORKSPACE
+          # Windows lockfile drift between platforms: --no-frozen-lockfile
+          # is intentional (mirrors pre-migration behavior); other
+          # platforms use --frozen-lockfile.
+          #
+          # beadbox-fzt: clarifying what --no-frozen-lockfile DOES and
+          # DOES NOT mean (qam flagged this as a secondary suspect during
+          # rc.16 triage). It does NOT pull "always latest" — bun still
+          # respects package.json constraints and uses bun.lock when it
+          # matches. The flag's only effect is to ALLOW regenerating
+          # bun.lock when the lockfile is stale (e.g., when Windows-only
+          # optionalDependencies entries differ from the macOS-generated
+          # lockfile checked into git). @tauri-apps/cli stays locked at
+          # 2.10.1 via package.json's ^2.10.0 + bun.lock's resolved
+          # 2.10.1 entry. Versioned upstream surfaces that DO need
+          # explicit pinning live elsewhere — see the Microsoft.Trusted
+          # .Signing.Client URL in the "Setup Azure Trusted Signing"
+          # step below.
+          bun install --no-frozen-lockfile --cwd "$env:GITHUB_WORKSPACE"
+          if ($LASTEXITCODE -ne 0) { throw "bun install failed (exit $LASTEXITCODE)" }
+          bash src-tauri/scripts/copy-sidecar.sh x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw "copy-sidecar.sh failed (exit $LASTEXITCODE)" }
+
+      - name: Build SPA (Windows-native paths)
+        # bb-mhh1.6 L4: Set-Location + bare `bun run build`. The
+        # `bun --cwd <path> run build` form (--cwd BEFORE the run
+        # subcommand) prints USAGE HELP and exits 0 on Windows under
+        # PowerShell — args parse wrong, no script runs, Vite produces
+        # nothing. Asymmetric with `bun install --cwd <path>` (--cwd
+        # AFTER subcommand) which works fine.
+        shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
+        env:
+          VITE_APP_VERSION: ${{ steps.version.outputs.version }}
+          VITE_BUILD_TAG: ${{ steps.version.outputs.build_tag }}
+          VITE_BUILD_ID: ${{ steps.version.outputs.build_id }}
+          VITE_POSTHOG_KEY: ${{ secrets.NEXT_PUBLIC_POSTHOG_KEY }}
+          VITE_POSTHOG_HOST: ${{ secrets.NEXT_PUBLIC_POSTHOG_HOST }}
+          # bb-xhf6: also expose under the legacy NEXT_PUBLIC_* names so any
+          # subprocess that still reads them (vestigial Next.js plugins,
+          # transitive deps) gets the same value. Pure additive — Vite reads
+          # only VITE_*; this is belt-and-suspenders.
+          NEXT_PUBLIC_POSTHOG_KEY: ${{ secrets.NEXT_PUBLIC_POSTHOG_KEY }}
+          NEXT_PUBLIC_POSTHOG_HOST: ${{ secrets.NEXT_PUBLIC_POSTHOG_HOST }}
+        run: |
+          Set-Location (Join-Path $env:GITHUB_WORKSPACE "packages\client")
+          bun run build
+          if ($LASTEXITCODE -ne 0) { throw "bun run build failed (exit $LASTEXITCODE)" }
+
+      - name: Setup Azure Trusted Signing
+        shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
+        run: |
+          $dlibDir = "$env:RUNNER_TEMP\codesigning"
+          New-Item -ItemType Directory -Path $dlibDir -Force | Out-Null
+
+          # beadbox-fzt: Pin Microsoft.Trusted.Signing.Client to 1.0.86.
+          # rc.16 (2026-05-15/16) failed Windows signing with a sub-second
+          # DLL load error in sign.bat. rc.15 (2026-05-03) PASSED with the
+          # same workflow logic — only difference was NuGet served a
+          # newer version when this URL was unpinned. NuGet history shows
+          # 1.0.92 (2025-06-11 "Fix bug on usage of interactive browser
+          # credential") then 1.0.95 (2025-06-23 "Fix regression bug
+          # using signtool targeting x86") — the fix-after-fix churn is
+          # the regression. 1.0.86 (2025-04-25) is the last release
+          # before that pattern.
+          #
+          # All versions of this package are `listed: false` on NuGet
+          # (Microsoft tombstoned the package); the direct-version URL
+          # below still resolves because the .nupkg files remain on the
+          # flat container even after delisting. To bump: verify a new
+          # version actually exists at
+          # https://api.nuget.org/v3-flatcontainer/microsoft.trusted.signing.client/index.json
+          # and dry-run a release before promoting.
+          Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/Microsoft.Trusted.Signing.Client/1.0.86" `
+            -OutFile "$dlibDir\package.zip"
+          Expand-Archive "$dlibDir\package.zip" -DestinationPath "$dlibDir\extracted" -Force
+
+          # Find the dlib (search recursively in case package layout changes)
+          $dlib = Get-ChildItem "$dlibDir\extracted" -Recurse -Filter "Azure.CodeSigning.Dlib.dll" |
+            Where-Object { $_.DirectoryName -match "x64" } |
+            Select-Object -First 1
+          if (-not $dlib) { throw "Azure.CodeSigning.Dlib.dll not found in NuGet package" }
+          Write-Output "Dlib: $($dlib.FullName)"
+
+          # Create metadata.json for Azure Trusted Signing
+          @{
+            Endpoint = "https://eus.codesigning.azure.net/"
+            CodeSigningAccountName = "Beadbox"
+            CertificateProfileName = "BeadboxApp"
+          } | ConvertTo-Json | Set-Content "$dlibDir\metadata.json"
+
+          # Find signtool.exe from Windows SDK
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $signtool) { throw "signtool.exe not found in Windows SDK" }
+          Write-Output "Signtool: $($signtool.FullName)"
+
+          # Create sign.bat wrapper so the Tauri signCommand string has no spaces,
+          # avoiding cmd.exe quote-stripping that mangles paths with spaces (e.g. "Program Files (x86)").
+          # Tauri substitutes %1 before passing to cmd.exe; sign.bat receives the file path as its %1.
+          # Note: PowerShell here-strings require content at column 0, which breaks YAML block scalar
+          # indentation. Use Set-Content with an array of lines instead.
+          #
+          # rc.23 diagnostic: sign.bat is failing in ~150ms with the bundle-level error
+          # "failed to run sign.bat" -- which swallows signtool's actual stderr. Redirect
+          # both streams to $dlibDir\sign-output.log so the "Show sign.bat output on
+          # failure" step below can dump real diagnostic text. Trailing block re-emits
+          # the capture file on stderr on non-zero exit so even bundlers that don't
+          # surface our follow-up step get the signal in their own error line. The
+          # cmd.exe redirect syntax `> path 2>&1` is the most portable form across
+          # Windows shells; %ERRORLEVEL% preserves signtool's actual exit code.
+          $signBat = "$dlibDir\sign.bat"
+          $signLog = "$dlibDir\sign-output.log"
+          # rc.26: prepend an 'echo cmd=[%*]' line BEFORE the signtool invocation
+          # so we capture the actual %1 value Tauri passed. shipper requested this
+          # disambiguation: if signtool produces zero stderr AND cmd= shows a valid
+          # path, dlib-swallows-output is confirmed; if cmd= shows missing/empty %1,
+          # the bug is in Tauri's argv substitution. The signtool redirect changes
+          # from '>' to '>>' so both lines land in the same log file.
+          $signtoolLine = "`"$($signtool.FullName)`" sign /v /fd SHA256 /tr http://timestamp.acs.microsoft.com /td SHA256 /dlib `"$($dlib.FullName)`" /dmdf `"$dlibDir\metadata.json`" %1 >> `"$signLog`" 2>&1"
+          # rc.27: echo errorlevel=%ERRORLEVEL% AFTER signtool returns. This
+          # distinguishes 'signtool crashed silently mid-execution' (the
+          # errorlevel line will be ABSENT from the log because cmd.exe didn't
+          # return from the call) from 'signtool exited with a code but
+          # produced no output' (errorlevel line present, value visible).
+          # The captured value also reaches a successive 'set EXIT' so we still
+          # propagate it as the bat's own exit code via 'exit /b %EXIT%'.
+          Set-Content -Path $signBat -Value @(
+            "@echo off",
+            "echo cmd=[%*] arg1=[%1] > `"$signLog`"",
+            $signtoolLine,
+            "echo errorlevel=%ERRORLEVEL% >> `"$signLog`"",
+            "set EXIT=%ERRORLEVEL%",
+            "if not %EXIT%==0 type `"$signLog`" 1>&2",
+            "exit /b %EXIT%"
+          ) -Encoding ASCII
+
+          # Create Tauri config override with signCommand pointing to the batch wrapper
+          @{
+            version = "${{ steps.version.outputs.version }}"
+            build = @{ beforeBuildCommand = "exit 0" }
+            bundle = @{ windows = @{ signCommand = "$signBat %1" }}
+          } | ConvertTo-Json -Depth 5 | Set-Content "$dlibDir\tauri-sign-config.json"
+
+          Get-Content "$dlibDir\tauri-sign-config.json"
+
+          # Export paths for build and re-sign steps
+          "TAURI_SIGN_CONFIG=$dlibDir\tauri-sign-config.json" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "SIGNTOOL_PATH=$($signtool.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "DLIB_PATH=$($dlib.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "METADATA_PATH=$dlibDir\metadata.json" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Build and sign Tauri app
+        shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          POSTHOG_KEY: ${{ secrets.NEXT_PUBLIC_POSTHOG_KEY }}
+          # tauri-plugin-updater signing for the Windows NSIS installer.
+          # Separate from Azure Trusted Signing (Authenticode); this is the
+          # minisign-format signing that tauri-plugin-updater verifies on the
+          # client side. Both signatures coexist on the .nsis.zip artifact.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          Set-Location $env:GITHUB_WORKSPACE
+          # rc.28 probe (qam ask): length-only print of AZURE_TENANT_ID so we
+          # know definitively whether THIS step has the secrets populated.
+          # GitHub Actions masks them as *** in the env-group log whether
+          # they're populated or empty, so this length-print is the only
+          # way to tell from a workflow log alone. Values themselves never
+          # printed -- only the length integer. Same for the other two.
+          Write-Output ("AZURE_TENANT_ID length: {0}" -f $env:AZURE_TENANT_ID.Length)
+          Write-Output ("AZURE_CLIENT_ID length: {0}" -f $env:AZURE_CLIENT_ID.Length)
+          Write-Output ("AZURE_CLIENT_SECRET length: {0}" -f $env:AZURE_CLIENT_SECRET.Length)
+          # bb-mhh1.6 L6: 'bun x' instead of 'bunx' -- manual Bun install
+          # at line 812-827 only places bun.exe (not a bunx shim) on PATH;
+          # the documented 'bun x' subcommand is contract-stable across
+          # bun releases. macOS/Linux jobs use oven-sh/setup-bun@v2 which
+          # ships bunx natively, so 'bunx' there is fine.
+          bun x tauri build --config "$env:TAURI_SIGN_CONFIG"
+
+      # rc.23 diagnostic: on Build-and-sign failure, dump sign.bat's captured
+      # stdout+stderr to the workflow log. The bundle-level "failed to run
+      # sign.bat" error swallows signtool's real output; this step surfaces it.
+      # Also emits sign.bat's own content + dlib/signtool/metadata existence
+      # checks so we can disambiguate file-not-found vs process-load-fail
+      # vs signtool-error classes without a second runner round-trip.
+      - name: Show sign.bat diagnostic output on failure
+        if: failure()
+        shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
+        env:
+          # rc.28: pipe Azure secrets into the diagnostic step's env so the
+          # OAuth token probe inside the script can actually use them.
+          # rc.27 had all three vars come back present=False/length=0 because
+          # the diagnostic step had no env block of its own and GitHub
+          # Actions does NOT inherit env from the previous step's env block.
+          # Without these, the auth-probe SKIPs and we miss the final
+          # disambiguator (cert lifecycle vs dlib-version vs missing-config).
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        run: |
+          # rc.27: $ErrorActionPreference = "Continue" makes individual probe
+          # failures non-fatal, AND every native-command call is wrapped in
+          # try/catch. rc.26 lost the OAuth probe because signtool /? wrote
+          # help text to stderr, PS marked NativeCommandError, and the script
+          # terminated before reaching downstream probes. Load-bearing probes
+          # now run FIRST (OAuth + creds), defensive ones (signtool smoke,
+          # Defender query) run LAST and are wrapped.
+          $ErrorActionPreference = "Continue"
+          $dlibDir = "$env:RUNNER_TEMP\codesigning"
+          $signLog = "$dlibDir\sign-output.log"
+          $signBat = "$dlibDir\sign.bat"
+
+          Write-Output "===== sign.bat content ====="
+          if (Test-Path $signBat) { Get-Content $signBat } else { Write-Output "(sign.bat missing at $signBat)" }
+          Write-Output ""
+          Write-Output "===== sign.bat captured stdout+stderr ====="
+          if (Test-Path $signLog) { Get-Content $signLog } else { Write-Output "(no log at $signLog -- failure was before sign.bat invoked, or before redirect target was writable)" }
+
+          # ---- LOAD-BEARING PROBES (run first; rc.25 narrowed to a-or-c) ----
+          Write-Output ""
+          Write-Output "===== Azure credential presence ====="
+          try {
+            @("AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET") | ForEach-Object {
+              $val = [Environment]::GetEnvironmentVariable($_)
+              $present = [bool]$val
+              $len = if ($val) { $val.Length } else { 0 }
+              Write-Output ("{0}: present={1} length={2}" -f $_, $present, $len)
+            }
+          } catch { Write-Output ("credential-presence probe failed: " + $_.Exception.Message) }
+
+          Write-Output ""
+          Write-Output "===== OAuth token probe (KEY disambiguator: dlib-broken vs cred-lifecycle) ====="
+          # If this succeeds with a token but signtool with /dlib fails, the dlib
+          # itself is broken. If this fails with the same creds, hypothesis (a)
+          # cert/credential lifecycle is confirmed. Scope codesigning.azure.net/.default
+          # matches what Azure.CodeSigning.Dlib requests internally.
+          # rc.29: save the acquired token to $authToken so downstream probes
+          # (JWT-claims-decode + data-plane endpoint probe) can reuse it.
+          $authToken = $null
+          try {
+            $tenantId = $env:AZURE_TENANT_ID
+            $clientId = $env:AZURE_CLIENT_ID
+            $clientSecret = $env:AZURE_CLIENT_SECRET
+            if (-not $tenantId -or -not $clientId -or -not $clientSecret) {
+              Write-Output "auth-probe: SKIPPED (credential env vars missing)"
+            } else {
+              $tokenUri = "https://login.microsoftonline.com/$tenantId/oauth2/v2.0/token"
+              $body = @{
+                client_id = $clientId
+                client_secret = $clientSecret
+                scope = "https://codesigning.azure.net/.default"
+                grant_type = "client_credentials"
+              }
+              try {
+                $resp = Invoke-RestMethod -Uri $tokenUri -Method Post -Body $body -ErrorAction Stop
+                $authToken = $resp.access_token
+                Write-Output ("auth-probe: OK (token-length={0})" -f $authToken.Length)
+              } catch {
+                Write-Output "auth-probe: FAIL"
+                Write-Output ("  exception type: {0}" -f $_.Exception.GetType().FullName)
+                Write-Output ("  http status: {0}" -f $_.Exception.Response.StatusCode)
+                if ($_.ErrorDetails) {
+                  Write-Output ("  error detail: {0}" -f $_.ErrorDetails.Message)
+                }
+              }
+            }
+          } catch { Write-Output ("auth-probe outer error: " + $_.Exception.Message) }
+
+          Write-Output ""
+          Write-Output "===== JWT claims decode (offline -- reveals aud/iss/appid/roles) ====="
+          # rc.29: decode the OAuth token's payload (middle base64url segment)
+          # to inspect what audience + roles Azure actually issued the token
+          # for. The dlib calls eus.codesigning.azure.net with this exact
+          # token; a mismatch between the token's `aud` claim and what the
+          # data-plane expects would cause a 401 the dlib then silently
+          # swallows. `roles` claim should include the Trusted Signing
+          # Certificate Profile Signer role if the service principal has it.
+          # Payload-only decode (signature not verified) is safe here since
+          # we already control the token's provenance.
+          try {
+            if (-not $authToken) {
+              Write-Output "jwt-decode: SKIPPED (no token from auth-probe)"
+            } else {
+              $parts = $authToken.Split('.')
+              if ($parts.Count -lt 2) {
+                Write-Output "jwt-decode: SKIPPED (token not in JWT format)"
+              } else {
+                $payload = $parts[1].Replace('-', '+').Replace('_', '/')
+                switch ($payload.Length % 4) { 2 { $payload += '==' } 3 { $payload += '=' } }
+                $bytes = [Convert]::FromBase64String($payload)
+                $json = [System.Text.Encoding]::UTF8.GetString($bytes)
+                $claims = $json | ConvertFrom-Json
+                Write-Output ("jwt: aud   = {0}" -f $claims.aud)
+                Write-Output ("jwt: iss   = {0}" -f $claims.iss)
+                Write-Output ("jwt: appid = {0}" -f $claims.appid)
+                Write-Output ("jwt: tid   = {0}" -f $claims.tid)
+                if ($claims.roles) {
+                  Write-Output ("jwt: roles = " + ($claims.roles -join ', '))
+                } else {
+                  Write-Output "jwt: roles = (none in token claims)"
+                }
+                if ($claims.scp) { Write-Output ("jwt: scp   = {0}" -f $claims.scp) }
+                Write-Output ("jwt: exp   = {0} (epoch seconds)" -f $claims.exp)
+              }
+            }
+          } catch { Write-Output ("jwt-decode failed: " + $_.Exception.Message) }
+
+          Write-Output ""
+          Write-Output "===== Code-signing data-plane probe (calls eus.codesigning.azure.net with token) ====="
+          # rc.29: send a real request to the data-plane endpoint to surface
+          # what error the resource side gives our token. The dlib calls
+          # this exact host with this exact token; the dlib then swallows
+          # whatever response/error comes back. Here we make the same call
+          # visibly and print the response body verbatim -- the body is
+          # where Azure's real error text lives (e.g. "Profile X not found
+          # in account Y", "Principal Z lacks role W", "Invalid audience").
+          #
+          # IMPORTANT: the probe URL below is my best guess at the data-
+          # plane sign endpoint; the dlib (Azure.CodeSigning.Dlib.dll) is
+          # not open-source so the exact path may differ. If the response
+          # status is 404, that COULD mean profile-missing OR could mean
+          # my URL is wrong. The response BODY content is the load-bearing
+          # signal -- read that first, status code second.
+          try {
+            if (-not $authToken) {
+              Write-Output "data-plane-probe: SKIPPED (no token)"
+            } else {
+              $probeUri = "https://eus.codesigning.azure.net/codesigningaccounts/Beadbox/certificateprofiles/BeadboxApp/sign?api-version=2023-06-15-preview"
+              Write-Output ("probe URL: " + $probeUri)
+              $headers = @{ Authorization = ("Bearer " + $authToken); "Content-Type" = "application/json" }
+              $stubBody = '{"signatureAlgorithm":"RS256","digest":""}'
+              try {
+                $resp = Invoke-WebRequest -Uri $probeUri -Method Post -Headers $headers -Body $stubBody -UseBasicParsing -ErrorAction Stop
+                Write-Output ("data-plane-probe: status={0}" -f $resp.StatusCode)
+                Write-Output "response body (first 1000 chars):"
+                Write-Output ($resp.Content.Substring(0, [Math]::Min(1000, $resp.Content.Length)))
+              } catch {
+                $errResp = $_.Exception.Response
+                if ($errResp) {
+                  $code = $errResp.StatusCode.value__
+                  Write-Output ("data-plane-probe: status={0} ({1})" -f $code, $errResp.StatusCode)
+                  if ($_.ErrorDetails) {
+                    Write-Output "response body (verbatim):"
+                    Write-Output $_.ErrorDetails.Message
+                  } else {
+                    Write-Output "(no response body captured -- only status code available)"
+                  }
+                  Write-Output ""
+                  Write-Output "Status-code interpretation (HEDGED -- response body above is primary signal):"
+                  switch ($code) {
+                    400 { Write-Output "  400 = bad request body. Most likely auth + profile + role are OK and the stub body was malformed (expected/desirable result -- means dlib's real sign call would work)" }
+                    401 { Write-Output "  401 = token REJECTED. Token aud/scope mismatch or token lifetime issue. Hypothesis class (3) resource-side rejection." }
+                    403 { Write-Output "  403 = authenticated but unauthorized. Hypothesis class (1) -- service principal lacks 'Trusted Signing Certificate Profile Signer' role. (Confirm via response body wording.)" }
+                    404 { Write-Output "  404 = path not found. Either hypothesis class (2) profile deleted/renamed, OR my probe URL above is incorrect for this account/api-version. Cross-check the response body for which." }
+                    default { Write-Output ("  {0} -- unexpected; trust the response body, not this interpretation" -f $code) }
+                  }
+                } else {
+                  Write-Output ("data-plane-probe: no HTTP response; error=" + $_.Exception.Message)
+                }
+              }
+            }
+          } catch { Write-Output ("data-plane-probe outer error: " + $_.Exception.Message) }
+
+          Write-Output ""
+          Write-Output "===== metadata.json content (cross-check vs Azure portal config) ====="
+          try {
+            if (Test-Path $env:METADATA_PATH) {
+              Get-Content $env:METADATA_PATH | Out-String | Write-Output
+            } else {
+              Write-Output "(METADATA_PATH not set or file missing)"
+            }
+          } catch { Write-Output ("metadata.json print failed: " + $_.Exception.Message) }
+
+          Write-Output ""
+          Write-Output "===== Azure endpoint reachability (port 443) ====="
+          try {
+            @("eus.codesigning.azure.net", "timestamp.acs.microsoft.com", "login.microsoftonline.com") | ForEach-Object {
+              $host_ = $_
+              $r = Test-NetConnection -ComputerName $host_ -Port 443 -InformationLevel Quiet -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+              Write-Output ("{0}:443 -> reachable={1}" -f $host_, $r)
+            }
+          } catch { Write-Output ("reachability probe failed: " + $_.Exception.Message) }
+
+          Write-Output ""
+          Write-Output "===== signtool standalone with /dlib on dummy file (isolates Tauri context) ====="
+          # shipper's rc.27 refinement: invoke signtool with /dlib directly on
+          # a known-good local file, bypassing Tauri's bundler entirely. This
+          # tells us whether the dlib silent-fail happens for ANY file the
+          # runner tries to sign, or only via Tauri's invocation context.
+          # Use signtool.exe itself as the dummy target -- it's a real PE
+          # we know exists and isn't important to actually sign. If the
+          # dlib's auth/load step is the failure point, the file content
+          # doesn't matter anyway.
+          try {
+            $dummyFile = "$dlibDir\dummy-for-sign-test.exe"
+            if ($env:SIGNTOOL_PATH -and (Test-Path $env:SIGNTOOL_PATH) -and $env:DLIB_PATH -and (Test-Path $env:DLIB_PATH)) {
+              Copy-Item $env:SIGNTOOL_PATH $dummyFile -Force -ErrorAction Stop
+              $standaloneOutput = & $env:SIGNTOOL_PATH sign /v /fd SHA256 /tr http://timestamp.acs.microsoft.com /td SHA256 /dlib $env:DLIB_PATH /dmdf $env:METADATA_PATH $dummyFile 2>&1 | Out-String
+              $standaloneExit = $LASTEXITCODE
+              Write-Output ("standalone exit code: {0}" -f $standaloneExit)
+              if ($standaloneOutput.Trim()) {
+                Write-Output "standalone output:"
+                Write-Output $standaloneOutput
+              } else {
+                Write-Output "(standalone produced ZERO output -- same silent-fail signature as the Tauri invocation; dlib fails on ANY signtool call regardless of context)"
+              }
+            } else {
+              Write-Output "(standalone test SKIPPED: SIGNTOOL_PATH or DLIB_PATH not set)"
+            }
+          } catch { Write-Output ("standalone /dlib probe failed: " + $_.Exception.Message) }
+
+          Write-Output ""
+          Write-Output "===== .NET runtimes installed on runner ====="
+          try {
+            $out = & dotnet --list-runtimes 2>&1 | Select-Object -First 20 | Out-String
+            Write-Output $out
+          } catch { Write-Output ("dotnet --list-runtimes failed: " + $_.Exception.Message) }
+
+          # ---- DEFENSIVE PROBES (run last; rc.25 already ruled most out) ----
+          Write-Output ""
+          Write-Output "===== file existence checks ====="
+          try {
+            @("$env:SIGNTOOL_PATH", "$env:DLIB_PATH", "$env:METADATA_PATH") | ForEach-Object {
+              if ($_) { Write-Output ("{0}: exists={1}" -f $_, (Test-Path $_)) }
+            }
+          } catch { Write-Output ("file-existence probe failed: " + $_.Exception.Message) }
+
+          Write-Output ""
+          Write-Output "===== Defender quarantine check (last 24h actions on signtool/dlib) ====="
+          try {
+            Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-Windows Defender/Operational'; StartTime=(Get-Date).AddHours(-24)} -ErrorAction SilentlyContinue |
+              Where-Object { $_.Message -match 'signtool|CodeSigning' } |
+              Select-Object -First 10 TimeCreated, Id, Message |
+              Format-List
+          } catch { Write-Output ("Defender query failed: " + $_.Exception.Message) }
+
+          Write-Output ""
+          Write-Output "===== signtool standalone smoke test (no /dlib) ====="
+          # NOTE: signtool /? writes help text to stderr. Wrapped in try/catch +
+          # captured to a variable (not piped) to prevent PS NativeCommandError
+          # from terminating the script (which is what killed rc.26's OAuth probe).
+          try {
+            if ($env:SIGNTOOL_PATH -and (Test-Path $env:SIGNTOOL_PATH)) {
+              $smokeOutput = & $env:SIGNTOOL_PATH /? 2>&1 | Select-Object -First 5 | Out-String
+              Write-Output $smokeOutput
+            } else {
+              Write-Output "(SIGNTOOL_PATH not set or missing)"
+            }
+          } catch { Write-Output ("signtool smoke failed: " + $_.Exception.Message) }
+
+      # Tauri's bundler may patch the binary after signing (e.g. injecting
+      # __TAURI_BUNDLE_TYPE), which corrupts the Authenticode signature.
+      # Re-sign the main binary after all Tauri modifications are complete.
+      - name: Re-sign main binary
+        shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        run: |
+          Write-Output "Re-signing beadbox.exe after Tauri build..."
+          $mainExe = "src-tauri\target\release\beadbox.exe"
+          $sig = Get-AuthenticodeSignature $mainExe
+          Write-Output "Before re-sign: Status=$($sig.Status)"
+          & $env:SIGNTOOL_PATH sign /v /fd SHA256 /tr http://timestamp.acs.microsoft.com /td SHA256 /dlib $env:DLIB_PATH /dmdf $env:METADATA_PATH $mainExe
+          if ($LASTEXITCODE -ne 0) { throw "Re-signing beadbox.exe failed with exit code $LASTEXITCODE" }
+
+      - name: Prepare release artifact
+        id: artifact
+        # PowerShell rather than bash: the rest of this job (signing, NSIS,
+        # artifact upload) is PowerShell, so the whole job speaks one shell.
+        shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
+        run: |
+          Set-Location $env:GITHUB_WORKSPACE
+          $version = "${{ steps.version.outputs.version }}"
+          $setupSrc = Get-ChildItem "src-tauri\target\release\bundle\nsis\*.exe" | Select-Object -First 1
+          if (-not $setupSrc) { throw "No NSIS setup .exe found under src-tauri\target\release\bundle\nsis" }
+          $setupName = "Beadbox-$version-Windows-x64-setup.exe"
+          Copy-Item -Path $setupSrc.FullName -Destination $setupName -Force
+          "setup=$setupName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Verify signing
+        shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
+        run: |
+          $mainExe = "src-tauri\target\release\beadbox.exe"
+          $sig = Get-AuthenticodeSignature $mainExe
+          Write-Output "beadbox.exe - Status: $($sig.Status), Signer: $($sig.SignerCertificate.Subject)"
+          if ($sig.Status -ne "Valid") { throw "beadbox.exe signing verification failed" }
+
+          $setup = "${{ steps.artifact.outputs.setup }}"
+          $sig = Get-AuthenticodeSignature $setup
+          Write-Output "setup.exe - Status: $($sig.Status), Signer: $($sig.SignerCertificate.Subject)"
+          if ($sig.Status -ne "Valid") { throw "setup.exe signing verification failed" }
+
+      - name: Upload to draft release
+        # PowerShell rather than bash: the rest of this job (signing, NSIS,
+        # artifact upload) is PowerShell, so the whole job speaks one shell.
+        shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          Set-Location $env:GITHUB_WORKSPACE
+          gh release upload $env:RELEASE_TAG "${{ steps.artifact.outputs.setup }}" --clobber --repo $env:GITHUB_REPOSITORY
+          if ($LASTEXITCODE -ne 0) { throw "gh release upload failed (exit $LASTEXITCODE)" }
+
+      - name: Upload updater bundle + signature (Windows x86_64)
+        shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          Set-Location $env:GITHUB_WORKSPACE
+          $ErrorActionPreference = "Continue"
+          # tauri-plugin-updater bundle: Tauri 2 on Windows produces
+          # *-setup.nsis.zip + .sig when TAURI_SIGNING_PRIVATE_KEY is set.
+          # Rename to Beadbox_x86_64.nsis.zip for consistent latest.json
+          # platform-key resolution.
+          $bundle = Get-ChildItem "src-tauri\target\release\bundle\nsis" -Filter "*-setup.nsis.zip" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $bundle -or -not (Test-Path "$($bundle.FullName).sig")) {
+            Write-Output "::warning::expected NSIS .nsis.zip + .sig not found in src-tauri\target\release\bundle\nsis; updater artifacts not uploaded"
+            Get-ChildItem "src-tauri\target\release\bundle" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 20 FullName | Format-List
+            exit 0
+          }
+          Copy-Item $bundle.FullName            "Beadbox_x86_64.nsis.zip"             -Force
+          Copy-Item "$($bundle.FullName).sig"  "Beadbox_x86_64.nsis.zip.sig"         -Force
+          gh release upload $env:RELEASE_TAG "Beadbox_x86_64.nsis.zip" "Beadbox_x86_64.nsis.zip.sig" --clobber --repo $env:GITHUB_REPOSITORY
+          if ($LASTEXITCODE -ne 0) { throw "gh release upload (updater bundle) failed (exit $LASTEXITCODE)" }
+
+  # ── tauri-plugin-updater manifest: assemble latest.json ──
+
+  publish-update-manifest:
+    # Generates latest.json that tauri-plugin-updater's check() reads.
+    # Pulls .sig contents from the release assets uploaded by each platform
+    # build job, infers platform keys from filenames, builds the manifest,
+    # uploads to the same release. Runs before promote so the .json lands
+    # in the draft before the release goes public.
+    if: >-
+      always() && !cancelled()
+      && !contains(needs.*.result, 'failure')
+      && needs.check-promote.outputs.skip_build != 'true'
+    needs: [create-arm64-dmg, build-linux, build-windows, check-promote]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Generate latest.json + upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${RELEASE_TAG}"
+          REPO="${{ github.repository }}"
+          VERSION="${TAG#v}"
+          WORK=$(mktemp -d)
+          trap 'rm -rf "$WORK"' EXIT
+
+          echo "Listing release assets..."
+          # Capture full assets (name + id) so we can resolve per-bundle asset
+          # ids; assets.txt keeps the name-only list for the fetch_sig grep.
+          gh release view "$TAG" --json assets --repo "$REPO" > "$WORK/assets.json"
+          jq -r '.assets[].name' "$WORK/assets.json" > "$WORK/assets.txt"
+          cat "$WORK/assets.txt"
+
+          # Helper: fetch .sig content for a given platform's bundle
+          fetch_sig() {
+            local sig_name="$1"
+            if grep -qx "$sig_name" "$WORK/assets.txt"; then
+              gh release download "$TAG" --pattern "$sig_name" --dir "$WORK" --clobber --repo "$REPO" >/dev/null 2>&1
+              if [ -f "$WORK/$sig_name" ]; then
+                cat "$WORK/$sig_name"
+                return 0
+              fi
+            fi
+            return 1
+          }
+
+          # beadbox-b2p (A-3'): nmelo/beadbox is PRIVATE. The
+          # github.com/<repo>/releases/download/<tag>/<artifact> redirect 404s
+          # for private repos even WITH a token, so latest.json's per-platform
+          # url MUST be the REST asset-API form. The Rust host (updater.rs)
+          # fetches these with Authorization: Bearer + Accept:
+          # application/octet-stream. Resolve each bundle's per-release asset id
+          # by name (empty -> skip that platform).
+          asset_api_url() {
+            local id
+            id=$(jq -r --arg n "$1" '.assets[] | select(.name==$n) | .id' "$WORK/assets.json")
+            if [ -n "$id" ] && [ "$id" != "null" ]; then
+              printf 'https://api.github.com/repos/%s/releases/assets/%s' "$REPO" "$id"
+            fi
+          }
+
+          platforms_json=""
+
+          # darwin-aarch64
+          if sig=$(fetch_sig "Beadbox_aarch64.app.tar.gz.sig"); then
+            url=$(asset_api_url "Beadbox_aarch64.app.tar.gz")
+            if [ -n "$url" ]; then
+              entry=$(jq -n --arg sig "$sig" --arg url "$url" '{signature:$sig, url:$url}')
+              platforms_json+="\"darwin-aarch64\":${entry},"
+            else
+              echo "::warning::darwin bundle asset id not found on $TAG; skipping darwin-aarch64"
+            fi
+          fi
+
+          # linux-x86_64 (either AppImage.tar.gz OR deb; prefer the first one found)
+          for linux_name in "Beadbox_x86_64.AppImage.tar.gz.sig" "Beadbox_x86_64.deb.sig"; do
+            if sig=$(fetch_sig "$linux_name"); then
+              artifact="${linux_name%.sig}"
+              url=$(asset_api_url "$artifact")
+              if [ -n "$url" ]; then
+                entry=$(jq -n --arg sig "$sig" --arg url "$url" '{signature:$sig, url:$url}')
+                platforms_json+="\"linux-x86_64\":${entry},"
+                break
+              fi
+              echo "::warning::linux bundle ${artifact} asset id not found; trying next"
+            fi
+          done
+
+          # windows-x86_64
+          if sig=$(fetch_sig "Beadbox_x86_64.nsis.zip.sig"); then
+            url=$(asset_api_url "Beadbox_x86_64.nsis.zip")
+            if [ -n "$url" ]; then
+              entry=$(jq -n --arg sig "$sig" --arg url "$url" '{signature:$sig, url:$url}')
+              platforms_json+="\"windows-x86_64\":${entry},"
+            else
+              echo "::warning::windows bundle asset id not found on $TAG; skipping windows-x86_64"
+            fi
+          fi
+
+          # Strip trailing comma; bail if no platforms found
+          platforms_json="${platforms_json%,}"
+          if [ -z "$platforms_json" ]; then
+            echo "::error::no platform .sig files found on release $TAG; latest.json would be empty"
+            exit 1
+          fi
+
+          # Release notes: use release body verbatim
+          NOTES=$(gh release view "$TAG" --json body --jq '.body' --repo "$REPO")
+          PUB_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          jq -n \
+            --arg version "$VERSION" \
+            --arg notes "$NOTES" \
+            --arg pub_date "$PUB_DATE" \
+            --argjson platforms "{${platforms_json}}" \
+            '{version:$version, notes:$notes, pub_date:$pub_date, platforms:$platforms}' \
+            > "$WORK/latest.json"
+
+          echo "Generated latest.json:"
+          cat "$WORK/latest.json" | jq .
+
+          gh release upload "$TAG" "$WORK/latest.json" --clobber --repo "$REPO"
+
+  # ── Promote draft release and update cask ──
+
+  promote:
+    if: >-
+      always() && !cancelled()
+      && !contains(needs.*.result, 'failure')
+      && needs.check-promote.outputs.skip_build != 'true'
+    needs: [create-arm64-dmg, build-linux, build-windows, check-promote, test, test-integration, publish-update-manifest]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: write
+    steps:
+      - name: Promote draft to published release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release edit "${RELEASE_TAG}" --draft=false \
+            --repo "${{ github.repository }}"
+
+  update-rc-cask:
+    if: >-
+      always() && !cancelled()
+      && (contains(github.ref_name, '-rc') || contains(github.event.inputs.tag, '-rc'))
+      && needs.create-arm64-dmg.result == 'success'
+      && needs.promote.result == 'success'
+    needs: [create-arm64-dmg, promote]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Extract version
+        id: version
+        run: |
+          RAW="${RELEASE_TAG#v}"
+          echo "version=${RAW%%-rc.*}" >> "$GITHUB_OUTPUT"
+          echo "build_tag=${RAW}" >> "$GITHUB_OUTPUT"
+          echo "build_id=${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+      - name: Get asset IDs (poll until available)
+        id: assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          MAX_ATTEMPTS=12
+          SLEEP_SECONDS=10
+          for attempt in $(seq 1 $MAX_ATTEMPTS); do
+            RELEASE_JSON=$(gh api repos/${{ github.repository }}/releases \
+              --jq '.[] | select(.tag_name == "'"${RELEASE_TAG}"'")')
+            ARM64_ID=$(echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name | contains("arm64.dmg")) | .id')
+            if [ -n "$ARM64_ID" ]; then
+              echo "Found asset ID on attempt $attempt (arm64=$ARM64_ID)"
+              echo "arm64_id=$ARM64_ID" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Attempt $attempt/$MAX_ATTEMPTS: arm64 asset not yet available (arm64=${ARM64_ID:-empty})"
+            if [ "$attempt" -lt "$MAX_ATTEMPTS" ]; then
+              sleep $SLEEP_SECONDS
+            fi
+          done
+          echo "::error::Could not find DMG asset IDs after $MAX_ATTEMPTS attempts (~$((MAX_ATTEMPTS * SLEEP_SECONDS))s)"
+          exit 1
+
+      - name: Checkout cask-dev repo
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: beadbox/homebrew-cask-dev
+          token: ${{ secrets.CASK_DEV_PAT }}
+          path: homebrew-cask-dev
+
+      - name: Update RC cask
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          ARM64_SHA: ${{ needs.create-arm64-dmg.outputs.sha }}
+          ARM64_ID: ${{ steps.assets.outputs.arm64_id }}
+        run: |
+          RUBY_INTERP='#{ENV["HOMEBREW_GITHUB_API_TOKEN"]}'
+          cat > homebrew-cask-dev/Casks/beadbox-rc.rb << EOF
+          cask "beadbox-rc" do
+            version "${VERSION}"
+
+            arch arm: "arm64"
+
+            sha256 "${ARM64_SHA}"
+            url "https://api.github.com/repos/nmelo/beadbox/releases/assets/${ARM64_ID}",
+                header: [
+                  "Accept: application/octet-stream",
+                  "Authorization: Bearer ${RUBY_INTERP}",
+                ]
+
+            name "Beadbox RC"
+            desc "Desktop app for the beads issue tracker (release candidate)"
+            homepage "https://github.com/beadbox/beadbox"
+
+            depends_on macos: ">= :ventura"
+
+            app "Beadbox.app"
+
+            zap trash: [
+              "~/Library/Application Support/com.nmelo.beadbox",
+              "~/Library/Caches/com.nmelo.beadbox",
+              "~/Library/Preferences/com.nmelo.beadbox.plist",
+              "~/Library/Application Support/com.nmelo.beads-ui",
+              "~/Library/Caches/com.nmelo.beads-ui",
+              "~/Library/Preferences/com.nmelo.beads-ui.plist",
+            ]
+          end
+          EOF
+          # Remove leading whitespace from heredoc
+          sed -i 's/^          //' homebrew-cask-dev/Casks/beadbox-rc.rb
+
+      - name: Push cask update
+        run: |
+          cd homebrew-cask-dev
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks/beadbox-rc.rb
+          git diff --cached --quiet && echo "No changes to commit" && exit 0
+          git commit -m "Update beadbox-rc to ${{ steps.version.outputs.version }}"
+          git push
+

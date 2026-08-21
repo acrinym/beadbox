@@ -1,0 +1,399 @@
+name: Promote RC to Final Release
+
+# Promotes validated RC artifacts to a final release without rebuilding.
+# Downloads the exact binaries from an RC release and republishes them as the
+# final version on both the private (nmelo/beadbox) and public (beadbox/beadbox)
+# repos, then updates the Homebrew cask.
+#
+# Usage: gh workflow run promote-release.yml -f rc_tag=v0.7.0-rc.2
+
+on:
+  workflow_dispatch:
+    inputs:
+      rc_tag:
+        description: "RC tag to promote (e.g., v0.7.0-rc.2)"
+        required: true
+        type: string
+      skip_public:
+        description: "Skip publishing to public repo"
+        type: boolean
+        default: false
+      skip_homebrew:
+        description: "Skip updating Homebrew cask"
+        type: boolean
+        default: false
+
+# beadbox-l5i.1: read-only default; jobs that write opt in below.
+permissions:
+  contents: read
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: write
+    outputs:
+      final_tag: ${{ steps.parse.outputs.final_tag }}
+      version: ${{ steps.parse.outputs.version }}
+      arm64_sha: ${{ steps.checksums.outputs.arm64_sha }}
+
+    steps:
+      - name: Parse RC tag
+        id: parse
+        env:
+          # Via env:, not ${{ }} inline — a dispatch input interpolated into a
+          # run: block is expanded by the runner before bash sees it, so its
+          # contents would execute as shell (zizmor template-injection). The
+          # format check below then constrains it to vX.Y.Z-rc.N.
+          INPUT_RC_TAG: ${{ inputs.rc_tag }}
+        run: |
+          RC_TAG="${INPUT_RC_TAG}"
+
+          # Validate format: must be vX.Y.Z-rc.N
+          if [[ ! "$RC_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
+            echo "::error::Invalid RC tag format: $RC_TAG (expected vX.Y.Z-rc.N)"
+            exit 1
+          fi
+
+          # Derive final tag by stripping -rc.N
+          FINAL_TAG="${RC_TAG%%-rc.*}"
+          VERSION="${FINAL_TAG#v}"
+
+          echo "rc_tag=$RC_TAG" >> "$GITHUB_OUTPUT"
+          echo "final_tag=$FINAL_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Promoting $RC_TAG -> $FINAL_TAG (version $VERSION)"
+
+      # Checkout BEFORE downloading artifacts. actions/checkout defaults to
+      # clean: true which runs git clean -ffdx, wiping any previously
+      # downloaded files in the workspace.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Download RC artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.parse.outputs.version }}"
+          RC_TAG="${{ steps.parse.outputs.rc_tag }}"
+
+          echo "Downloading artifacts from $RC_TAG..."
+          gh release download "$RC_TAG" \
+            --repo "${{ github.repository }}" \
+            --pattern "*.dmg" --pattern "*.deb" --pattern "*.exe" \
+            --clobber
+
+          echo ""
+          echo "Downloaded artifacts:"
+          ls -la
+
+          # Validate all 3 expected artifacts exist (macOS x64 build is disabled;
+          # AppImage dropped in v0.25 per bb-ak1x — restoration deferred to v0.26).
+          EXPECTED=(
+            "Beadbox-${VERSION}-macOS-arm64.dmg"
+            "beadbox_${VERSION}_Linux_amd64.deb"
+            "Beadbox-${VERSION}-Windows-x64-setup.exe"
+          )
+
+          MISSING=0
+          for f in "${EXPECTED[@]}"; do
+            if [ ! -f "$f" ]; then
+              echo "::error::Missing artifact: $f"
+              MISSING=1
+            else
+              echo "Found: $f ($(stat -c%s "$f" 2>/dev/null || stat -f%z "$f") bytes)"
+            fi
+          done
+
+          if [ "$MISSING" -eq 1 ]; then
+            echo "::error::RC release is incomplete. All 3 artifacts are required for promotion."
+            exit 1
+          fi
+
+      - name: Compute checksums
+        id: checksums
+        run: |
+          VERSION="${{ steps.parse.outputs.version }}"
+          echo "SHA256 checksums:"
+          sha256sum Beadbox-* beadbox_*
+
+          ARM64_SHA=$(sha256sum "Beadbox-${VERSION}-macOS-arm64.dmg" | cut -d' ' -f1)
+          echo "arm64_sha=$ARM64_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Create final tag
+        run: |
+          RC_TAG="${{ steps.parse.outputs.rc_tag }}"
+          FINAL_TAG="${{ steps.parse.outputs.final_tag }}"
+
+          # Point the final tag at the same commit as the RC tag
+          RC_COMMIT=$(git rev-list -n 1 "$RC_TAG")
+          echo "RC commit: $RC_COMMIT"
+
+          if git rev-parse "$FINAL_TAG" >/dev/null 2>&1; then
+            EXISTING_COMMIT=$(git rev-list -n 1 "$FINAL_TAG")
+            if [ "$EXISTING_COMMIT" = "$RC_COMMIT" ]; then
+              echo "Tag $FINAL_TAG already exists at the correct commit"
+            else
+              echo "::warning::Tag $FINAL_TAG exists at $EXISTING_COMMIT but RC is at $RC_COMMIT. Updating tag."
+              git tag -f "$FINAL_TAG" "$RC_COMMIT"
+              git push origin "$FINAL_TAG" --force
+            fi
+          else
+            echo "Creating tag $FINAL_TAG at $RC_COMMIT"
+            git tag "$FINAL_TAG" "$RC_COMMIT"
+            git push origin "$FINAL_TAG"
+          fi
+
+      - name: Create final release on private repo
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.parse.outputs.version }}"
+          FINAL_TAG="${{ steps.parse.outputs.final_tag }}"
+          RC_TAG="${{ steps.parse.outputs.rc_tag }}"
+
+          # Delete existing final release if present (from a previous failed attempt or rebuild)
+          gh release delete "$FINAL_TAG" --repo "${{ github.repository }}" --yes 2>/dev/null || true
+
+          gh release create "$FINAL_TAG" \
+            "Beadbox-${VERSION}-macOS-arm64.dmg" \
+            "beadbox_${VERSION}_Linux_amd64.deb" \
+            "Beadbox-${VERSION}-Windows-x64-setup.exe" \
+            --repo "${{ github.repository }}" \
+            --title "$FINAL_TAG" \
+            --notes "Release ${VERSION} (promoted from ${RC_TAG})"
+
+          echo "Created release $FINAL_TAG on private repo"
+
+      - name: Trigger website deploy
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Triggering website deploy for ${{ steps.parse.outputs.final_tag }}..."
+          gh workflow run deploy-website.yml --repo "${{ github.repository }}"
+
+  publish-public:
+    if: ${{ !inputs.skip_public }}
+    needs: promote
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Download artifacts from final release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "${{ needs.promote.outputs.final_tag }}" \
+            --repo "${{ github.repository }}" \
+            --pattern "*.dmg" --pattern "*.deb" --pattern "*.exe" \
+            --clobber
+
+      - name: Verify checksums match
+        run: |
+          VERSION="${{ needs.promote.outputs.version }}"
+          ARM64_SHA=$(sha256sum "Beadbox-${VERSION}-macOS-arm64.dmg" | cut -d' ' -f1)
+
+          if [ "$ARM64_SHA" != "${{ needs.promote.outputs.arm64_sha }}" ]; then
+            echo "::error::arm64 DMG checksum mismatch after re-download!"
+            exit 1
+          fi
+          echo "Checksums verified: artifacts are byte-identical"
+
+      - name: Publish to public repo
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_REPO_PAT }}
+        run: |
+          TAG="${{ needs.promote.outputs.final_tag }}"
+          VERSION="${{ needs.promote.outputs.version }}"
+
+          gh release delete "$TAG" --repo beadbox/beadbox --yes 2>/dev/null || true
+
+          gh release create "$TAG" \
+            "Beadbox-${VERSION}-macOS-arm64.dmg" \
+            "beadbox_${VERSION}_Linux_amd64.deb" \
+            "Beadbox-${VERSION}-Windows-x64-setup.exe" \
+            --repo beadbox/beadbox \
+            --title "$TAG" \
+            --notes "## Beadbox $TAG
+
+          **macOS** (Apple Silicon, signed and notarized):
+          - **Apple Silicon (M1/M2/M3/M4):** Beadbox-${VERSION}-macOS-arm64.dmg
+
+          **Windows** (x64, signed):
+          - **Installer:** Beadbox-${VERSION}-Windows-x64-setup.exe
+
+          **Linux** (x86_64):
+          - Debian: beadbox_${VERSION}_Linux_amd64.deb
+
+          Visit [beadbox.app](https://beadbox.app) for install options."
+
+      - name: Publish PM-authored release notes to public repo
+        # beadbox-l5i.9 / pm/systemdesign.md §6.2 (release-notes pipeline,
+        # Nelson-ruled 2026-08-21; supersedes the old extraction step).
+        #
+        # Source : release-notes/<TAG>.md, top level of the PRIVATE repo,
+        #          filename matching the tag exactly including the leading v.
+        #          PM owns the whole file INCLUDING its heading.
+        # Artifact: beadbox/beadbox : changelog/<TAG>.md. This exact path is
+        #          load-bearing — the in-app update dialog reads it.
+        #
+        # Published VERBATIM: no awk extraction, no synthesised heading, no
+        # transformation of any kind. The previous version regex-sliced a
+        # section out of the private internal changelog, which is precisely
+        # how internal prose reaches a public repo. Nothing here reinterprets
+        # release copy.
+        #
+        # NB the private changelog filename is deliberately not spelled out
+        # anywhere in this file: this workflow ships in the public snapshot,
+        # and publish-snapshot.sh's dangling-reference report greps shipped
+        # files for the literal name of excluded paths.
+        env:
+          PRIVATE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PUBLIC_TOKEN: ${{ secrets.PUBLIC_REPO_PAT }}
+          PRIVATE_REPO: ${{ github.repository }}
+          TAG: ${{ needs.promote.outputs.final_tag }}
+        run: |
+          set -euo pipefail
+          SRC="release-notes/${TAG}.md"
+          DEST="changelog/${TAG}.md"
+
+          # Fail loud on a missing source. Previously a missing/unmatched
+          # section only warned and exited 0, so a release could ship with an
+          # empty in-app changelog and nobody would notice. Per §6.2 a missing
+          # file now BLOCKS promotion.
+          if ! GH_TOKEN="$PRIVATE_TOKEN" gh api \
+                 "repos/${PRIVATE_REPO}/contents/${SRC}" \
+                 --jq '.content' > /tmp/notes.b64 2>/tmp/notes.err; then
+            echo "::error::Release notes not found at ${SRC} in ${PRIVATE_REPO}."
+            echo "::error::PM authors this file per pm/systemdesign.md 6.2; it must exist before promotion."
+            sed 's/^/  /' /tmp/notes.err || true
+            exit 1
+          fi
+
+          tr -d '\n' < /tmp/notes.b64 | base64 -d > /tmp/changelog-version.md
+
+          if [ ! -s /tmp/changelog-version.md ]; then
+            echo "::error::${SRC} exists but is empty — refusing to publish an empty changelog."
+            exit 1
+          fi
+
+          echo "Publishing ${SRC} verbatim to ${DEST}:"
+          cat /tmp/changelog-version.md
+
+          FILE_CONTENT=$(base64 -w0 /tmp/changelog-version.md)
+
+          # Existing file needs its SHA to update.
+          CURRENT_SHA=$(GH_TOKEN="$PUBLIC_TOKEN" gh api \
+            "repos/beadbox/beadbox/contents/${DEST}" --jq '.sha' 2>/dev/null || echo "")
+
+          if [ -n "$CURRENT_SHA" ]; then
+            GH_TOKEN="$PUBLIC_TOKEN" gh api "repos/beadbox/beadbox/contents/${DEST}" \
+              -X PUT \
+              -f message="docs: add changelog for ${TAG}" \
+              -f content="$FILE_CONTENT" \
+              -f sha="$CURRENT_SHA"
+          else
+            GH_TOKEN="$PUBLIC_TOKEN" gh api "repos/beadbox/beadbox/contents/${DEST}" \
+              -X PUT \
+              -f message="docs: add changelog for ${TAG}" \
+              -f content="$FILE_CONTENT"
+          fi
+
+          echo "Created ${DEST} in beadbox/beadbox"
+
+      - name: Update public repo release body with changelog
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_REPO_PAT }}
+        run: |
+          TAG="${{ needs.promote.outputs.final_tag }}"
+
+          # Use the changelog file we just generated
+          if [ ! -f /tmp/changelog-version.md ]; then
+            echo "::warning::No changelog file generated, skipping release body update"
+            exit 0
+          fi
+
+          NOTES=$(cat /tmp/changelog-version.md)
+          gh release edit "$TAG" \
+            --repo beadbox/beadbox \
+            --notes "$NOTES"
+
+          echo "Updated release body for $TAG on beadbox/beadbox"
+
+  publish-homebrew:
+    if: ${{ !inputs.skip_homebrew && !inputs.skip_public }}
+    needs: [promote, publish-public]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Download DMGs from final release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "${{ needs.promote.outputs.final_tag }}" \
+            --repo "${{ github.repository }}" \
+            --pattern "*.dmg" \
+            --clobber
+
+      - name: Verify checksums match
+        run: |
+          VERSION="${{ needs.promote.outputs.version }}"
+          ARM64_SHA=$(sha256sum "Beadbox-${VERSION}-macOS-arm64.dmg" | cut -d' ' -f1)
+
+          if [ "$ARM64_SHA" != "${{ needs.promote.outputs.arm64_sha }}" ]; then
+            echo "::error::arm64 DMG checksum mismatch!"
+            exit 1
+          fi
+          echo "Checksums verified"
+
+      - name: Update Homebrew cask
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_REPO_PAT }}
+        run: |
+          VERSION="${{ needs.promote.outputs.version }}"
+          ARM64_SHA="${{ needs.promote.outputs.arm64_sha }}"
+
+          rm -rf /tmp/cask
+          git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/beadbox/homebrew-cask.git" /tmp/cask
+
+          cat > /tmp/cask/Casks/beadbox.rb << CASK_EOF
+          cask "beadbox" do
+            version "${VERSION}"
+
+            arch arm: "arm64"
+
+            sha256 "${ARM64_SHA}"
+            url "https://github.com/beadbox/beadbox/releases/download/v#{version}/Beadbox-#{version}-macOS-arm64.dmg"
+
+            name "Beadbox"
+            desc "Desktop app for the beads issue tracker"
+            homepage "https://github.com/beadbox/beadbox"
+
+            depends_on macos: ">= :ventura"
+
+            app "Beadbox.app"
+
+            zap trash: [
+              "~/Library/Application Support/com.nmelo.beadbox",
+              "~/Library/Caches/com.nmelo.beadbox",
+              "~/Library/Preferences/com.nmelo.beadbox.plist",
+              "~/Library/Application Support/com.nmelo.beads-ui",
+              "~/Library/Caches/com.nmelo.beads-ui",
+              "~/Library/Preferences/com.nmelo.beads-ui.plist",
+            ]
+          end
+          CASK_EOF
+          # Remove leading whitespace from heredoc
+          sed -i 's/^          //' /tmp/cask/Casks/beadbox.rb
+
+          cd /tmp/cask
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks/beadbox.rb
+          git diff --cached --quiet && echo "No changes to commit" && exit 0
+          git commit -m "beadbox: update to ${VERSION}"
+          git push origin main

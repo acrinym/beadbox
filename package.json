@@ -1,0 +1,57 @@
+{
+  "name": "beadbox",
+  "version": "0.25.2",
+  "description": "Web interface for viewing and managing beads issue tracking databases",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/beadbox/beadbox.git"
+  },
+  "author": "Nelson Melo",
+  "homepage": "https://github.com/beadbox/beadbox#readme",
+  "bugs": {
+    "url": "https://github.com/beadbox/beadbox/issues"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "bun --cwd=packages/client run dev",
+    "lint": "biome lint packages/",
+    "format": "biome format --write packages/",
+    "check": "biome check --write packages/",
+    "release": "rm -rf dist && bun run tauri build && node scripts/package-release.js",
+    "test": "bun --cwd=packages/server run test && bun --cwd=packages/client run test",
+    "test:server": "bun --cwd=packages/server run test",
+    "test:client": "bun --cwd=packages/client run test",
+    "test:integration": "bunx vitest run --config vitest.integration.config.mts",
+    "test:e2e": "playwright test --pass-with-no-tests",
+    "test:e2e:ui": "playwright test --ui --pass-with-no-tests",
+    "quality:check": "bash scripts/quality-check.sh",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "server:dev": "bun --cwd=packages/server run dev",
+    "server:build": "bun --cwd=packages/server run build",
+    "server:test": "bun --cwd=packages/server run test",
+    "quality:mutation:server": "bun --cwd=packages/server run quality:mutation",
+    "quality:regen": "bash scripts/regen-quality-docs.sh",
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.13",
+    "@playwright/test": "^1.58.2",
+    "@tauri-apps/cli": "^2.10.0",
+    "@types/node": "^22",
+    "husky": "^9.1.7",
+    "typescript": "^5",
+    "vite-tsconfig-paths": "^6.1.0",
+    "vitest": "^4.0.18"
+  },
+  "overrides": {
+    "serialize-javascript": "^7.0.3",
+    "dompurify": ">=3.3.2",
+    "seroval": "^1.6.2",
+    "protobufjs": "^7.6.5"
+  }
+}

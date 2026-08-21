@@ -1,0 +1,7 @@
+{
+  "identifier": "mobile",
+  "description": "Mobile capabilities (no shell/sidecar)",
+  "windows": ["main"],
+  "platforms": ["iOS", "android"],
+  "permissions": ["core:default"]
+}

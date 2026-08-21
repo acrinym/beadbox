@@ -1,0 +1,38 @@
+# beadbox-l5i.1: zizmor configuration for the workflow-hygiene gate in
+# quality-gates.yml.
+#
+# The gate runs `zizmor --min-severity=high`. Everything below is a HIGH
+# finding we have looked at and accepted, with the reason written down. A new
+# high finding that is not listed here fails the build — that is the point.
+#
+# Re-audit with:  zizmor --min-severity=high .github/workflows/
+rules:
+  cache-poisoning:
+    # Ten findings: Swatinem/rust-cache + oven-sh/setup-bun in jobs that
+    # publish release assets.
+    #
+    # The attack zizmor is describing: a cache entry written from a less
+    # trusted context (a branch build) is later restored by a release build,
+    # so poisoned cache content reaches a signed artifact.
+    #
+    # ACCEPTED FOR NOW, NOT DISMISSED. Removing the caches makes every release
+    # build compile Rust cold on three platforms, and macOS runners bill at
+    # 10x — so it is a real cost decision, not a one-line fix. Tracked as a
+    # follow-up (see the DONE comment on beadbox-l5i.1). Partial mitigation
+    # already in place: release.yml uses distinct `shared-key`s per platform,
+    # and the artifacts are signed + notarized after the build.
+    ignore:
+      - release.yml
+      - deploy-website.yml
+  dangerous-triggers:
+    # One finding: install-smoke.yml's `workflow_run` trigger on Release.
+    #
+    # workflow_run is on zizmor's list because the triggered workflow runs in
+    # the base-repo context with the base repo's secrets. Here the blast
+    # radius is small: install-smoke declares `permissions: contents: read`,
+    # takes no input from the triggering run beyond `head_branch`, and
+    # validates that value against a `v[0-9]*` shape before using it. It also
+    # cannot be reached from a fork — workflow_run only fires for workflows
+    # in the base repository.
+    ignore:
+      - install-smoke.yml

@@ -1,0 +1,21 @@
+{
+  "build": {
+    "beforeDevCommand": "",
+    "beforeBuildCommand": "",
+    "devUrl": "http://localhost:41450",
+    "frontendDist": "loading"
+  },
+  "app": {
+    "security": {
+      "csp": "default-src * 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; connect-src * 'self' ws: wss: http: https:; img-src * 'self' data: blob:;"
+    }
+  },
+  "bundle": {
+    "resources": {},
+    "externalBin": [],
+    "iOS": {
+      "minimumSystemVersion": "16.0",
+      "developmentTeam": "K7Z8YKVA8G"
+    }
+  }
+}

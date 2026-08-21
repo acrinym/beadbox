@@ -1,0 +1,16 @@
+# beadbox-l5i.1: actionlint configuration for the workflow-hygiene gate in
+# quality-gates.yml.
+#
+# The gate exists to keep the open-sourcing CI-security posture from
+# regressing (runner class, action pinning, token permissions) — not to
+# enforce shell style. The hygiene step therefore runs actionlint with
+# SHELLCHECK_OPTS="--severity=warning", which drops shellcheck's info/style
+# advice on the pre-existing release scripts while still failing on real
+# warnings and on every actionlint check.
+paths:
+  .github/workflows/install-smoke.yml:
+    ignore:
+      # The Windows smoke job is deliberately parked behind `if: false`
+      # (bb-m4h2, Bun Win32 CWD issue). Re-enabling it is a separate bead;
+      # until then actionlint's constant-condition check is expected noise.
+      - 'constant expression "false" in condition'

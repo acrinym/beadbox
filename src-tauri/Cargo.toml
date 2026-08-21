@@ -1,0 +1,60 @@
+[package]
+name = "beadbox"
+version = "0.25.2"
+description = "Native desktop app for Beads issue tracker"
+authors = ["Nelson Melo"]
+license = "MIT"
+repository = "https://github.com/beadbox/beadbox"
+edition = "2021"
+
+[lib]
+name = "beadbox_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Desktop-only: kkrpc bridge to the Bun sidecar (P4.1) plus the Tauri
+# plugins the SPA still consumes from the WebView (file pickers, app exit).
+# tauri-plugin-shell + reqwest + libc + windows-sys were dropped in P4.3
+# along with the dead Node-sidecar spawn machinery. keyring stays for
+# credentials.rs; sha2 stays for telemetry_id.rs.
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+tauri-plugin-dialog = "2"
+tauri-plugin-process = "2"
+tauri-plugin-js = "0.1.0"
+tauri-plugin-updater = "2"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "linux-native"] }
+sha2 = "0.10"
+# beadbox-b2p (A-3'): private-repo self-update. reqwest makes the single
+# authenticated GitHub API call that resolves the latest.json asset id; rustls
+# + url are matched to tauri-plugin-updater's own backend (rustls-no-provider
+# + a manually-installed ring provider) so no second TLS stack is pulled in.
+# See src/updater.rs.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+url = "2"
+
+# Linux-only: GTK HeaderBar for window decorations on X11,
+# gdk for intercepting Ctrl+R before WebKitGTK consumes it
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+gdk = "0.18"
+
+# iOS-only: open external URLs in Safari via UIApplication
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2 = { version = "0.6", default-features = false }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSString", "NSURL"] }
+objc2-ui-kit = { version = "0.3", default-features = false, features = ["UIApplication", "UIResponder"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 8
+strip = "symbols"
+opt-level = "z"
+panic = "abort"

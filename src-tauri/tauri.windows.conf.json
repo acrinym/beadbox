@@ -1,0 +1,18 @@
+{
+  "bundle": {
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico", "icons/icon.png"],
+    "resources": {},
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico",
+        "headerImage": "icons/nsis-header.bmp",
+        "sidebarImage": "icons/nsis-sidebar.bmp",
+        "compression": "lzma",
+        "startMenuFolder": "Beadbox",
+        "minimumWebview2Version": "110.0.1531.0"
+      }
+    }
+  }
+}

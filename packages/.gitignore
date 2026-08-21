@@ -1,0 +1,17 @@
+# Workspace-local ignores for packages/*. Mirrors tb0/.gitignore.
+
+# Bun + Node
+node_modules/
+.bun-cache/
+
+# TypeScript
+*.tsbuildinfo
+
+# Build outputs
+dist/
+build/
+out/
+
+# OS
+.DS_Store
+Thumbs.db

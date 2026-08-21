@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en" class="dark theme-gray">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Session token meta is a Next.js server-side concern (lib/session-token.ts).
+         Once the SPA loads via the Tauri asset protocol in P4, the sidecar
+         supplies any session identity over kkrpc, so this placeholder is inert. -->
+    <meta name="bb-session" content="__SPA_NO_TOKEN__" />
+    <title>Beadbox</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

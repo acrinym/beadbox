@@ -1,0 +1,93 @@
+# beadbox-l5i.5: cargo-deny configuration for the shipped Rust dependency graph.
+#
+# Purpose: make `cargo deny check` reproducible and reviewable. Without a
+# config, cargo-deny evaluates against its small built-in allowlist and fails
+# essentially everything, which is noise rather than signal.
+#
+# The bar is MIT-compatibility, per the project's MIT license
+# (pm/opensource-checklist.md §1). Every entry below was observed in the actual
+# graph via `cargo deny list`; this is not a speculative allowlist.
+
+[licenses]
+# Permissive licenses, all compatible with distributing an MIT-licensed work.
+allow = [
+  "0BSD",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "MIT-0",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+
+  # MPL-2.0 — weak, FILE-level copyleft. Present only transitively
+  # (cssparser, cssparser-macros, dtoa-short, option-ext, selectors), and we
+  # do not modify any of them, so the reciprocity obligation attaches to
+  # files we never touch. Standard practice treats this as compatible with
+  # shipping inside an MIT work.
+  # Recorded as decision D4 on beadbox-l5i.5 for Nelson; allowed here so the
+  # gate reflects current practice rather than blocking on a formality.
+  "MPL-2.0",
+]
+
+# Note on r-efi: it appears under LGPL-2.1-or-later in a raw license listing,
+# but it is multi-licensed (Apache-2.0 OR LGPL-2.1-or-later OR MIT). Because
+# Apache-2.0 and MIT are allowed above, cargo-deny selects one of those and
+# LGPL never applies. No exception is required.
+
+[advisories]
+# AC-4 gates on VULNERABILITIES in what we ship. Everything else is reported
+# but does not fail the build, so the gate stays meaningful: a genuinely new
+# vulnerability turns CI red, and nothing else does.
+yanked = "warn"
+unmaintained = "none"
+
+# unmaintained = "none": this gate is for VULNERABILITIES. The 17
+# `unmaintained` notices in this graph are all gtk-rs GTK3 bindings plus
+# fxhash, reached transitively through Tauri. "Unmaintained" is not a
+# vulnerability, and we cannot act on any of them without Tauri changing its
+# own dependencies. Deferred with the rest of the low-impact tail to
+# beadbox-l5i.7, which has no severity gate.
+# To review them at any time:  cargo deny --config deny.toml check advisories
+# after temporarily setting unmaintained = "all".
+
+ignore = [
+  # ── quick-xml 0.38.4, two DoS advisories, RECORDED NOT SILENTLY DROPPED ──
+  #
+  # RUSTSEC-2026-0194  quadratic run time on duplicate attribute names
+  # RUSTSEC-2026-0195  unbounded namespace-declaration allocation
+  #
+  # It IS a runtime dependency, not build-only — verified with
+  # `cargo tree -e normal -i quick-xml`:
+  #     quick-xml -> plist v1.8.0 -> tauri v2.10.2 -> beadbox
+  # (`cargo tree -e build -i quick-xml` prints "nothing to print".)
+  #
+  # NOT FIXABLE BY US: `cargo update -p quick-xml` locks 0 packages. Tauri
+  # constrains plist/quick-xml to ^0.38 and the fix landed in >=0.41.0, so
+  # resolving this needs an upstream Tauri release, not a lockfile change.
+  #
+  # ACCEPTED under Nelson's launch risk policy (opensource-checklist §4):
+  # ship locally-scoped issues that require existing device control; never
+  # ship personal/infra/token exposure or anything exploitable WITHOUT device
+  # control. Both advisories are denial-of-service reached by feeding
+  # malicious XML to a parser. Tauri's plist usage reads the application's
+  # OWN bundle property lists, so triggering either one means already being
+  # able to rewrite files inside the installed bundle — i.e. existing device
+  # control. No remote or unauthenticated path.
+  #
+  # Revisit when Tauri ships a release that moves plist/quick-xml past 0.41.
+  "RUSTSEC-2026-0194",
+  "RUSTSEC-2026-0195",
+]
+
+[bans]
+multiple-versions = "allow"   # a Tauri graph legitimately carries many
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

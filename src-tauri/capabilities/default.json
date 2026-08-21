@@ -1,0 +1,7 @@
+{
+  "identifier": "default",
+  "description": "Default capabilities for Beads app",
+  "windows": ["main"],
+  "platforms": ["macOS", "linux", "windows"],
+  "permissions": ["core:default", "js:default", "dialog:allow-open", "process:allow-exit", "process:allow-restart", "updater:default"]
+}

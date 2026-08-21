@@ -1,0 +1,5 @@
+[test]
+# Preload runs BEFORE any test file is loaded, in the same JS context.
+# We need this for tests that transitively import posthog-js (which
+# eagerly evaluates `location` at module-load and crashes otherwise).
+preload = ["./src/__tests__/_test-globals.ts"]
