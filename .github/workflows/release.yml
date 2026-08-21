@@ -160,6 +160,25 @@ jobs:
         with:
           ref: ${{ env.RELEASE_TAG }}
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - name: Install bd (beads CLI)
+        # beadbox-l5i.6.3: ported verbatim from quality-gates.yml. The retired
+        # homelab runner had bd installed; hosted runners do not, so the server
+        # suite dies on 'Executable not found in $PATH: "bd"'. This job never
+        # ran after the l5i.1 migration because nothing tagged until cutover C,
+        # so the cousin of the quality-gates fix was never noticed.
+        # Installed rather than mocked on purpose: the failing suites assert
+        # behaviour against a REAL cobra CLI.
+        # Version pinned; keep in step with quality-gates.yml's BD_VERSION.
+        env:
+          BD_VERSION: "1.2.2"
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL --proto '=https' --tlsv1.2 \
+            "https://github.com/gastownhall/beads/releases/download/v${BD_VERSION}/beads_${BD_VERSION}_linux_amd64.tar.gz" \
+            | tar xzf - -C "$HOME/.local/bin" bd
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/bd" version
       - name: Install dependencies
         run: bun install --frozen-lockfile
       - name: Unit tests
@@ -175,6 +194,57 @@ jobs:
         with:
           ref: ${{ env.RELEASE_TAG }}
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - name: Install bd (beads CLI)
+        # beadbox-l5i.6.3: ported verbatim from quality-gates.yml. The retired
+        # homelab runner had bd installed; hosted runners do not, so the server
+        # suite dies on 'Executable not found in $PATH: "bd"'. This job never
+        # ran after the l5i.1 migration because nothing tagged until cutover C,
+        # so the cousin of the quality-gates fix was never noticed.
+        # Installed rather than mocked on purpose: the failing suites assert
+        # behaviour against a REAL cobra CLI.
+        # Version pinned; keep in step with quality-gates.yml's BD_VERSION.
+        env:
+          BD_VERSION: "1.2.2"
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL --proto '=https' --tlsv1.2 \
+            "https://github.com/gastownhall/beads/releases/download/v${BD_VERSION}/beads_${BD_VERSION}_linux_amd64.tar.gz" \
+            | tar xzf - -C "$HOME/.local/bin" bd
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/bd" version
+      - name: Install dolt (integration fixture spawns a real Dolt server)
+        # beadbox-l5i.6.3: NOT a duplicate of the bd install above. The beads
+        # release tarball ships only bd (verified: CHANGELOG.md, LICENSE,
+        # README.md, bd) — it does not vendor dolt. tests/integration drives
+        # e2e/fixtures/dolt-server.ts, which spawns `dolt sql-server` directly
+        # and polls it with `dolt sql -q`, so dolt must be on PATH in its own
+        # right. Installing only bd would move the failure from a bd ENOENT to
+        # a dolt ENOENT.
+        # findDolt() probes $HOME/.local/bin, so this resolves without
+        # depending on GITHUB_PATH ordering. Tarball layout is
+        # dolt-linux-amd64/bin/dolt, hence --strip-components=2.
+        env:
+          DOLT_VERSION: "2.3.1"
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL --proto '=https' --tlsv1.2 \
+            "https://github.com/dolthub/dolt/releases/download/v${DOLT_VERSION}/dolt-linux-amd64.tar.gz" \
+            | tar xzf - -C "$HOME/.local/bin" --strip-components=2 dolt-linux-amd64/bin/dolt
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/dolt" version
+          # Dolt refuses `dolt init` without an author identity ("Author identity
+          # unknown ... fatal: empty ident name not allowed", exit 1). Developer
+          # machines have this configured globally, which is why the suite passes
+          # locally and would fail here. The fixture runs `dolt init` with
+          # stdio:"ignore" and does NOT check its status, so an unconfigured
+          # runner produces no database and the failure only surfaces later as
+          # bd's opaque `database "beadbox" not found on Dolt server`.
+          # Verified on Ubuntu 24.04: without these two lines, 4 of 8
+          # integration tests fail; with them, 8/8 pass.
+          "$HOME/.local/bin/dolt" config --global --add user.name  "beadbox-ci"
+          "$HOME/.local/bin/dolt" config --global --add user.email "ci@beadbox.app"
       - name: Install dependencies
         run: bun install --frozen-lockfile
       - name: Build SPA
