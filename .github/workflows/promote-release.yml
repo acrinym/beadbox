@@ -90,26 +90,43 @@ jobs:
           echo "Downloaded artifacts:"
           ls -la
 
-          # Validate all 3 expected artifacts exist (macOS x64 build is disabled;
-          # AppImage dropped in v0.25 per bb-ak1x — restoration deferred to v0.26).
-          EXPECTED=(
+          # Artifacts are validated by NAME, split into required and optional.
+          # Deliberately not a count: "any two of three" would happily promote a
+          # release missing macOS as long as some other pair turned up.
+          #
+          # Windows is optional because its signing credentials are not yet
+          # provisioned (beadbox-l5i.6.1), so the transition release ships two
+          # platforms. When Windows returns it is validated again automatically,
+          # and can also be added to an existing release as a later asset.
+          # macOS x64 is disabled; AppImage was dropped in v0.25 per bb-ak1x.
+          REQUIRED=(
             "Beadbox-${VERSION}-macOS-arm64.dmg"
             "beadbox_${VERSION}_Linux_amd64.deb"
+          )
+          OPTIONAL=(
             "Beadbox-${VERSION}-Windows-x64-setup.exe"
           )
 
           MISSING=0
-          for f in "${EXPECTED[@]}"; do
+          for f in "${REQUIRED[@]}"; do
             if [ ! -f "$f" ]; then
-              echo "::error::Missing artifact: $f"
+              echo "::error::Missing required artifact: $f"
               MISSING=1
             else
-              echo "Found: $f ($(stat -c%s "$f" 2>/dev/null || stat -f%z "$f") bytes)"
+              echo "Found (required): $f ($(stat -c%s "$f" 2>/dev/null || stat -f%z "$f") bytes)"
+            fi
+          done
+
+          for f in "${OPTIONAL[@]}"; do
+            if [ -f "$f" ]; then
+              echo "Found (optional): $f ($(stat -c%s "$f" 2>/dev/null || stat -f%z "$f") bytes)"
+            else
+              echo "Absent (optional, not an error): $f"
             fi
           done
 
           if [ "$MISSING" -eq 1 ]; then
-            echo "::error::RC release is incomplete. All 3 artifacts are required for promotion."
+            echo "::error::RC release is incomplete: a REQUIRED artifact is missing. Promotion aborted."
             exit 1
           fi
 
@@ -158,10 +175,16 @@ jobs:
           # Delete existing final release if present (from a previous failed attempt or rebuild)
           gh release delete "$FINAL_TAG" --repo "${{ github.repository }}" --yes 2>/dev/null || true
 
+          # Same required/optional split as the validation step: attach Windows
+          # only if it was actually built, otherwise gh fails on a missing file.
+          ASSETS=(
+            "Beadbox-${VERSION}-macOS-arm64.dmg"
+            "beadbox_${VERSION}_Linux_amd64.deb"
+          )
+          [ -f "Beadbox-${VERSION}-Windows-x64-setup.exe" ] && ASSETS+=("Beadbox-${VERSION}-Windows-x64-setup.exe")
+
           gh release create "$FINAL_TAG" \
-            "Beadbox-${VERSION}-macOS-arm64.dmg" \
-            "beadbox_${VERSION}_Linux_amd64.deb" \
-            "Beadbox-${VERSION}-Windows-x64-setup.exe" \
+            "${ASSETS[@]}" \
             --repo "${{ github.repository }}" \
             --title "$FINAL_TAG" \
             --notes "Release ${VERSION} (promoted from ${RC_TAG})"
@@ -223,24 +246,40 @@ jobs:
 
           gh release delete "$TAG" --repo beadbox/beadbox --yes 2>/dev/null || true
 
+          WINDOWS_EXE="Beadbox-${VERSION}-Windows-x64-setup.exe"
+
+          ASSETS=(
+            "Beadbox-${VERSION}-macOS-arm64.dmg"
+            "beadbox_${VERSION}_Linux_amd64.deb"
+          )
+          [ -f "$WINDOWS_EXE" ] && ASSETS+=("$WINDOWS_EXE")
+
+          # The release body is built to match the assets actually attached.
+          # Listing a Windows installer that was not built would put a download
+          # link on the public release page that 404s for anyone who clicks it.
+          NOTES_FILE="$(mktemp)"
+          {
+            echo "## Beadbox $TAG"
+            echo ""
+            echo "**macOS** (Apple Silicon, signed and notarized):"
+            echo "- **Apple Silicon (M1/M2/M3/M4):** Beadbox-${VERSION}-macOS-arm64.dmg"
+            echo ""
+            if [ -f "$WINDOWS_EXE" ]; then
+              echo "**Windows** (x64, signed):"
+              echo "- **Installer:** ${WINDOWS_EXE}"
+              echo ""
+            fi
+            echo "**Linux** (x86_64):"
+            echo "- Debian: beadbox_${VERSION}_Linux_amd64.deb"
+            echo ""
+            echo "Visit [beadbox.app](https://beadbox.app) for install options."
+          } > "$NOTES_FILE"
+
           gh release create "$TAG" \
-            "Beadbox-${VERSION}-macOS-arm64.dmg" \
-            "beadbox_${VERSION}_Linux_amd64.deb" \
-            "Beadbox-${VERSION}-Windows-x64-setup.exe" \
+            "${ASSETS[@]}" \
             --repo beadbox/beadbox \
             --title "$TAG" \
-            --notes "## Beadbox $TAG
-
-          **macOS** (Apple Silicon, signed and notarized):
-          - **Apple Silicon (M1/M2/M3/M4):** Beadbox-${VERSION}-macOS-arm64.dmg
-
-          **Windows** (x64, signed):
-          - **Installer:** Beadbox-${VERSION}-Windows-x64-setup.exe
-
-          **Linux** (x86_64):
-          - Debian: beadbox_${VERSION}_Linux_amd64.deb
-
-          Visit [beadbox.app](https://beadbox.app) for install options."
+            --notes-file "$NOTES_FILE"
 
       - name: Publish PM-authored release notes to public repo
         # beadbox-l5i.9 / pm/systemdesign.md §6.2 (release-notes pipeline,
