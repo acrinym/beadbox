@@ -11,12 +11,15 @@
 # Tier 2 (this workflow):
 #   - coverage-server / coverage-client / coverage-rust: enforce
 #     coverage floors: server 60 / client 20 / src-tauri Rust 65 lines.
-#     NOTE the "spec §2 Q1" citation used in the failure messages below is a
-#     DANGLING REFERENCE — pm/spec.md §2 is "Data Model" and contains no
-#     coverage section; the floors are recorded nowhere but this file. Flagged
-#     on beadbox-l5i.6.4 for pm to either create the section or drop the
-#     citation. Left in place rather than silently removed so the gap stays
-#     visible.
+#     THIS FILE IS THE SOURCE OF TRUTH for those numbers. The failure
+#     messages used to cite a "spec §2 Q1" that does not exist — a fossil of
+#     the pruned private quality-discipline doc, not pm/spec.md. pm ruled
+#     (beadbox-l5i.6.4) to drop the citations rather than create a floors
+#     section, because duplicating enforcement numbers into a doc recreates
+#     the drift it is meant to prevent, and a red PR citing a nonexistent
+#     section actively misleads the contributor reading it. Each message
+#     already states the floor and the measured value, which is the useful
+#     part. CONTRIBUTING.md points here.
 #   - mutation-rust: cargo-mutants against src-tauri; floor 75%.
 #   - mutation-server: Stryker on Bun via command-runner (bb-ystl.3 /
 #     QD.3); narrow initial scope (handlers/console.ts) because
@@ -99,7 +102,7 @@ jobs:
           echo "packages/server line coverage: $PCT%"
           AWK_PASS=$(awk -v p="$PCT" 'BEGIN{print (p+0 >= 60.0) ? "1" : "0"}')
           if [ "$AWK_PASS" != "1" ]; then
-            echo "::error::packages/server coverage $PCT% below floor 60.0% (spec §2 Q1)"
+            echo "::error::packages/server coverage $PCT% below floor 60.0%"
             echo "::error::See artifact 'coverage-server' for per-file breakdown."
             exit 1
           fi
@@ -132,7 +135,7 @@ jobs:
           echo "packages/client line coverage: $PCT%"
           AWK_PASS=$(awk -v p="$PCT" 'BEGIN{print (p+0 >= 20.0) ? "1" : "0"}')
           if [ "$AWK_PASS" != "1" ]; then
-            echo "::error::packages/client coverage $PCT% below floor 20.0% (spec §2 Q1, post-QD.1 re-baseline)"
+            echo "::error::packages/client coverage $PCT% below floor 20.0% (post-QD.1 re-baseline)"
             echo "::error::See artifact 'coverage-client' for per-file breakdown."
             exit 1
           fi
@@ -358,7 +361,7 @@ jobs:
           echo "src-tauri mutation: caught=$CAUGHT missed=$MISSED timeout=$TIMEOUT total=$TOTAL score=$PCT%"
           AWK_PASS=$(awk -v p="$PCT" 'BEGIN{print (p+0 >= 75.0) ? "1" : "0"}')
           if [ "$AWK_PASS" != "1" ]; then
-            echo "::error::src-tauri mutation $PCT% below floor 75.0% (spec §2 Q1, 7pt cushion below current 81.8%)"
+            echo "::error::src-tauri mutation $PCT% below floor 75.0% (7pt cushion below current 81.8%)"
             echo "::error::Missed mutants in target/mutants/missed.txt — see artifact."
             exit 1
           fi
