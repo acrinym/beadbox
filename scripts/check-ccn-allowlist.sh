@@ -47,16 +47,30 @@ done
 
 # ── Locate lizard ──
 LIZARD_BIN=""
-if [ -x "/tmp/lizvenv/bin/lizard" ]; then
-  LIZARD_BIN="/tmp/lizvenv/bin/lizard"
-elif command -v lizard-analyzer >/dev/null 2>&1; then
-  LIZARD_BIN="$(command -v lizard-analyzer)"
-elif command -v lizard >/dev/null 2>&1; then
-  # Distinguish the analyzer from LZ4's `lizard`: --version on the analyzer
-  # prints "Lizard command line interface ...", LZ4's prints LZ4-style help.
-  if lizard --version 2>&1 | grep -qi "Lizard command line interface"; then
-    LIZARD_BIN="$(command -v lizard)"
+# Unix venv uses bin/; Git-for-Windows venv uses Scripts/.
+for cand in \
+  "/tmp/lizvenv/bin/lizard" \
+  "/tmp/lizvenv/Scripts/lizard" \
+  "/tmp/lizvenv/Scripts/lizard.exe"; do
+  if [ -x "$cand" ]; then
+    LIZARD_BIN="$cand"
+    break
   fi
+done
+if [ -z "$LIZARD_BIN" ] && command -v lizard-analyzer >/dev/null 2>&1; then
+  LIZARD_BIN="$(command -v lizard-analyzer)"
+fi
+if [ -z "$LIZARD_BIN" ]; then
+  for cmd in lizard lizard.exe; do
+    if command -v "$cmd" >/dev/null 2>&1; then
+      # Distinguish the analyzer from LZ4's `lizard`: --version on the analyzer
+      # prints "Lizard command line interface ...", LZ4's prints LZ4-style help.
+      if "$cmd" --version 2>&1 | grep -qi "Lizard command line interface"; then
+        LIZARD_BIN="$(command -v "$cmd")"
+        break
+      fi
+    fi
+  done
 fi
 if [ -z "$LIZARD_BIN" ]; then
   cat >&2 <<EOF
