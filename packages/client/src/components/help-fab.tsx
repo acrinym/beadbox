@@ -91,7 +91,11 @@ export function HelpFab() {
 
     // Detect current screen from pathname
     const screen =
-      window.location.pathname === "/activity" ? "Activity tab" : "Beads tab (main dashboard)"
+      window.location.pathname === "/activity"
+        ? "Activity tab"
+        : window.location.pathname === "/trains"
+          ? "Trains tab"
+          : "Beads tab (main dashboard)"
 
     try {
       const res = await fetch("/api/help", {

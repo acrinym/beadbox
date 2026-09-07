@@ -9,6 +9,7 @@ Beadbox gives `bd` users a visual interface for the things a terminal can't show
 ## Features
 
 - **Epic tree** — hierarchical view of epics and child beads with status, priority, and progress at a glance
+- **Trains** — `.beadtrain` files in the workspace `.beads/` folder: ready cars, coupler joins, click through to the bead
 - **Live updates** — changes made from the `bd` CLI appear in the UI in real time; no refresh
 - **Bead detail** — full descriptions, comments, dependencies, and workflow advancement in a side panel or modal
 - **Filters** — slice by status, type, priority, and assignee; filters persist across sessions
@@ -18,7 +19,7 @@ Beadbox gives `bd` users a visual interface for the things a terminal can't show
 
 ## Install
 
-**Requires the [beads](https://github.com/gastownhall/beads) CLI, version 1.0.1 or newer** (`brew install beads`). Beadbox is a GUI over `bd`; all data lives in your beads database.
+**Requires the [beads](https://github.com/gastownhall/beads) CLI, version 1.0.1 or newer** (`brew install beads`). Beadbox is a GUI over `bd`; issue data lives in your beads database. `.beadtrain` files in `.beads/` are optional plans (see [Beadtrains](https://github.com/acrinym/Beadtrains)) shown on the Trains tab.
 
 ### macOS
 

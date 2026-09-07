@@ -497,16 +497,17 @@ function ActivityViewer() {
       }
 
       // Cmd+1/Cmd+2/Cmd+3: view switching (always active)
-      if ((e.metaKey || e.ctrlKey) && (e.key === "1" || e.key === "2" || e.key === "3")) {
+      if ((e.metaKey || e.ctrlKey) && (e.key === "1" || e.key === "2" || e.key === "3" || e.key === "4")) {
         e.preventDefault()
         if (e.key === "1") {
           navigate({ to: "/" })
         }
         if (e.key === "3") {
           const enabled = isFeatureEnabled("enable-formulas")
-          // TanStack Router types are derived from generated routeTree;
-          // /formulas lands in P3.5. Cast until that route file ships.
           if (enabled) navigate({ to: "/formulas" as never })
+        }
+        if (e.key === "4") {
+          navigate({ to: "/trains" as never })
         }
         return
       }

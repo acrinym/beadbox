@@ -485,10 +485,11 @@ export function FormulasView() {
         setSettingsOpen(true)
         return
       }
-      if ((e.metaKey || e.ctrlKey) && (e.key === "1" || e.key === "2")) {
+      if ((e.metaKey || e.ctrlKey) && (e.key === "1" || e.key === "2" || e.key === "4")) {
         e.preventDefault()
         if (e.key === "1") router.navigate({ to: "/" as never })
         if (e.key === "2") router.navigate({ to: "/activity" as never })
+        if (e.key === "4") router.navigate({ to: "/trains" as never })
         return
       }
     }

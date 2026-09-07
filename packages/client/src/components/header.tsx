@@ -22,6 +22,7 @@ import {
   RefreshCw,
   ServerCrash,
   Settings,
+  TrainFront,
 } from "lucide-react"
 import posthog from "posthog-js"
 import { isFeatureEnabled } from "@/lib/feature-flag"
@@ -353,6 +354,23 @@ export function Header({
                 <TooltipContent>
                   {formulasEnabled ? "Formulas \u2318\u0033" : "Formulas (early access)"}
                 </TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    onClick={() => navigateTo("trains", "tab")}
+                    className={cn(
+                      "px-2.5 py-1.5 text-sm font-medium rounded-md transition-colors inline-flex items-center gap-1.5",
+                      pathname === "/trains"
+                        ? "bg-accent text-foreground"
+                        : "text-muted-foreground hover:text-foreground hover:bg-accent/50",
+                    )}
+                  >
+                    <TrainFront className="h-3.5 w-3.5" />
+                    Trains
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>Trains ⌘4</TooltipContent>
               </Tooltip>
             </div>
           )}

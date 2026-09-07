@@ -191,6 +191,12 @@ describe("handleGlobalShortcut", () => {
     window.localStorage.removeItem("beadbox_flag_overrides")
   })
 
+  test("Cmd+4 navigates to /trains", () => {
+    const ctx = makeCtx()
+    expect(handleGlobalShortcut(fireKey("4", { metaKey: true }), ctx)).toBe(true)
+    expect(ctx.router.push).toHaveBeenCalledWith("/trains")
+  })
+
   test("Cmd+3 with flag off does not navigate", () => {
     const ctx = makeCtx()
     // beadbox-l5i.1 / qa1: pin the override to false rather than REMOVING it,

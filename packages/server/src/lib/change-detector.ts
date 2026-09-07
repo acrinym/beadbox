@@ -50,7 +50,7 @@
 import { type ChildProcess, execFile, spawn } from "child_process"
 import { createHash } from "crypto"
 import { existsSync, type FSWatcher, readFileSync, watch } from "fs"
-import { readFile } from "fs/promises"
+import { readFile, readdir } from "fs/promises"
 import { basename, dirname, join, resolve } from "path"
 import { SUBSCRIPTION_PREFIX, type SubscriptionEvent } from "../subscribe-protocol"
 import { buildServerEnv, getWorkspacePassword } from "./bd"
@@ -149,6 +149,20 @@ export async function readMetadataMode(dbPath: string): Promise<DoltMode> {
 // what counts as fresh state. The manifest file is ~150 bytes; hashing
 // it on every check is sub-millisecond.
 
+async function hashBeadtrainFiles(beadsDir: string): Promise<string | null> {
+  const names = await readdir(beadsDir).catch(() => [] as string[])
+  const files = names.filter((name) => name.endsWith(".beadtrain")).sort()
+  if (files.length === 0) return null
+  const hasher = createHash("sha256")
+  for (const name of files) {
+    const data = await readFile(join(beadsDir, name)).catch(() => null)
+    if (!data) continue
+    hasher.update(name)
+    hasher.update(data)
+  }
+  return `beadtrain:${hasher.digest("hex").slice(0, 16)}`
+}
+
 export async function getChangeFingerprint(dbPath: string): Promise<string | null> {
   try {
     const markerPaths = await getWorkspaceWriteMarkerPaths(dbPath)
@@ -166,6 +180,10 @@ export async function getChangeFingerprint(dbPath: string): Promise<string | nul
 
     const valid = parts.filter((p): p is string => p !== null)
     if (valid.length === 0) return null
+
+    const beadsDir = basename(dbPath) === ".beads" ? dbPath : dirname(dbPath)
+    const trainBits = await hashBeadtrainFiles(beadsDir)
+    if (trainBits) valid.push(trainBits)
 
     return valid.join(",")
   } catch (err) {
