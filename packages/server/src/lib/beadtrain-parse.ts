@@ -49,6 +49,27 @@ function parseStringArray(raw: string): string[] {
   return parts
 }
 
+function arrayIsClosed(raw: string): boolean {
+  let quote: '"' | "'" | null = null
+  let escaped = false
+  for (const ch of raw) {
+    if (escaped) {
+      escaped = false
+      continue
+    }
+    if (quote === '"' && ch === "\\") {
+      escaped = true
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = quote === ch ? null : quote ?? ch
+      continue
+    }
+    if (ch === "]" && quote === null) return true
+  }
+  return false
+}
+
 function assignPath(root: TomlTable, path: string[], value: TomlValue): void {
   let cursor: TomlTable = root
   for (let i = 0; i < path.length - 1; i += 1) {
@@ -126,6 +147,11 @@ export function parseBeadtrainToml(source: string): TomlTable {
     }
 
     if (rhs.startsWith("[")) {
+      while (!arrayIsClosed(rhs) && i < lines.length) {
+        const next = lines[i]
+        i += 1
+        rhs += `\n${next}`
+      }
       current[key] = parseStringArray(rhs)
       continue
     }

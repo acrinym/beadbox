@@ -161,4 +161,16 @@ describe("getChangeFingerprint (beadbox-v7l)", () => {
     const fp2 = await getChangeFingerprint(join(tmpRoot, ".beads"))
     expect(fp1).toBe(fp2)
   })
+
+  test("fingerprint flips for a nested beadtrain edit", async () => {
+    await setupServerLayout(tmpRoot, "bb")
+    const trainDir = join(tmpRoot, ".beads", "plans")
+    await mkdir(trainDir, { recursive: true })
+    const train = join(trainDir, "demo.beadtrain")
+    await writeFile(train, '[train]\nname = "before"\n')
+    const fp1 = await getChangeFingerprint(join(tmpRoot, ".beads"))
+    await writeFile(train, '[train]\nname = "after"\n')
+    const fp2 = await getChangeFingerprint(join(tmpRoot, ".beads"))
+    expect(fp2).not.toBe(fp1)
+  })
 })

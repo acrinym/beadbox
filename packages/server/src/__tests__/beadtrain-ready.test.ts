@@ -72,6 +72,14 @@ describe("beadtrain parse + ready", () => {
     expect(train.couplers[0]?.toCar).toBe("start")
   })
 
+  test("parses multiline v1.3 dependency arrays", () => {
+    const train = parseTrainSource(
+      "multiline.beadtrain",
+      PRIMARY.replace('depends_on     = ["build"]', 'depends_on     = [\n  "build",\n]'),
+    )
+    expect(train.cars[1]?.dependsOn).toEqual(["build"])
+  })
+
   test("ready after closed capstone unlocks secondary start", () => {
     const trains = [
       parseTrainSource("example_primary_demo.beadtrain", PRIMARY),

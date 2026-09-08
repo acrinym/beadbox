@@ -50,11 +50,12 @@
 import { type ChildProcess, execFile, spawn } from "child_process"
 import { createHash } from "crypto"
 import { existsSync, type FSWatcher, readFileSync, watch } from "fs"
-import { readFile, readdir } from "fs/promises"
+import { readFile } from "fs/promises"
 import { basename, dirname, join, resolve } from "path"
 import { SUBSCRIPTION_PREFIX, type SubscriptionEvent } from "../subscribe-protocol"
 import { buildServerEnv, getWorkspacePassword } from "./bd"
 import { resolveBdPath } from "./bd-paths"
+import { beadsDirFromDatabasePath, listTrainPaths } from "./beadtrain-fs"
 import { drainPool, getPool, PortFileMissingError } from "./dolt-pool"
 import { getDoltDir, getWorkspaceWriteMarkerPaths } from "./dolt-write-marker"
 import { parseServerUri } from "./workspace-registry"
@@ -150,14 +151,13 @@ export async function readMetadataMode(dbPath: string): Promise<DoltMode> {
 // it on every check is sub-millisecond.
 
 async function hashBeadtrainFiles(beadsDir: string): Promise<string | null> {
-  const names = await readdir(beadsDir).catch(() => [] as string[])
-  const files = names.filter((name) => name.endsWith(".beadtrain")).sort()
+  const files = (await listTrainPaths(beadsDir)).sort()
   if (files.length === 0) return null
   const hasher = createHash("sha256")
-  for (const name of files) {
-    const data = await readFile(join(beadsDir, name)).catch(() => null)
+  for (const path of files) {
+    const data = await readFile(path).catch(() => null)
     if (!data) continue
-    hasher.update(name)
+    hasher.update(path.slice(beadsDir.length))
     hasher.update(data)
   }
   return `beadtrain:${hasher.digest("hex").slice(0, 16)}`
@@ -181,8 +181,8 @@ export async function getChangeFingerprint(dbPath: string): Promise<string | nul
     const valid = parts.filter((p): p is string => p !== null)
     if (valid.length === 0) return null
 
-    const beadsDir = basename(dbPath) === ".beads" ? dbPath : dirname(dbPath)
-    const trainBits = await hashBeadtrainFiles(beadsDir)
+    const beadsDir = beadsDirFromDatabasePath(dbPath)
+    const trainBits = beadsDir ? await hashBeadtrainFiles(beadsDir) : null
     if (trainBits) valid.push(trainBits)
 
     return valid.join(",")
