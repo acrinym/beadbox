@@ -439,8 +439,14 @@ jobs:
         # runners always start empty, so just build the venv.
         run: |
           set -euo pipefail
+          # beadbox-7pj: pinned. The version lives in ONE place -- the gate
+          # script -- so a bump there is a bump here. Unpinned, the verdict
+          # depended on whatever PyPI served on the day.
+          LIZARD_VERSION="$(grep -oE '^LIZARD_VERSION="[^"]+"' scripts/check-ccn-allowlist.sh | cut -d'"' -f2)"
+          [ -n "$LIZARD_VERSION" ] || { echo "::error::LIZARD_VERSION not found in scripts/check-ccn-allowlist.sh"; exit 1; }
           python3 -m venv /tmp/lizvenv
-          /tmp/lizvenv/bin/pip install --quiet lizard
+          /tmp/lizvenv/bin/pip install --quiet "lizard==${LIZARD_VERSION}"
+          /tmp/lizvenv/bin/lizard --version
       - name: Run CCN gate (full repo)
         run: bash scripts/check-ccn-allowlist.sh --mode=full
 

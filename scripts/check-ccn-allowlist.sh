@@ -30,6 +30,11 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 ALLOWLIST="$REPO_ROOT/lizard-allowlist.txt"
 MODE="full"
 THRESHOLD=15
+# beadbox-7pj: the ONE place the analyzer version is pinned. CI reads this line
+# (quality-gates.yml greps it), so bumping here bumps both. Unpinned, the gate's
+# verdict was whatever PyPI served that day; and a locally different version
+# can parse nothing and read as "no violations".
+LIZARD_VERSION="1.24.0"
 
 # ── Args ──
 for arg in "$@"; do
@@ -46,40 +51,46 @@ for arg in "$@"; do
 done
 
 # ── Locate lizard ──
+# beadbox-7pj: every candidate is accepted ONLY if `--version` prints exactly
+# the pinned version. That single check does four jobs: it rejects LZ4's
+# `lizard` (whose --version prints a "Lizard command line interface ..."
+# banner -- the previous detection grepped for that banner to ACCEPT the
+# analyzer, i.e. it selected the compressor, which parses nothing and reads
+# as zero violations); it rejects a stale /tmp/lizvenv from an older pin; it
+# rejects a differently-versioned analyzer that would report a different
+# violator set from CI; and it names found-vs-expected on the way out.
 LIZARD_BIN=""
+REJECTED=""
+try_lizard() {
+  local bin="$1"
+  [ -x "$bin" ] || command -v "$bin" >/dev/null 2>&1 || return 1
+  local got
+  got="$("$bin" --version 2>&1 | head -1 | tr -d '\r')"
+  if [ "$got" = "$LIZARD_VERSION" ]; then
+    LIZARD_BIN="$(command -v "$bin" 2>/dev/null || echo "$bin")"
+    return 0
+  fi
+  REJECTED="${REJECTED}  ${bin}: --version printed '${got}'
+"
+  return 1
+}
 # Unix venv uses bin/; Git-for-Windows venv uses Scripts/.
 for cand in \
   "/tmp/lizvenv/bin/lizard" \
   "/tmp/lizvenv/Scripts/lizard" \
-  "/tmp/lizvenv/Scripts/lizard.exe"; do
-  if [ -x "$cand" ]; then
-    LIZARD_BIN="$cand"
-    break
-  fi
+  "/tmp/lizvenv/Scripts/lizard.exe" \
+  lizard-analyzer lizard lizard.exe; do
+  try_lizard "$cand" && break
 done
-if [ -z "$LIZARD_BIN" ] && command -v lizard-analyzer >/dev/null 2>&1; then
-  LIZARD_BIN="$(command -v lizard-analyzer)"
-fi
-if [ -z "$LIZARD_BIN" ]; then
-  for cmd in lizard lizard.exe; do
-    if command -v "$cmd" >/dev/null 2>&1; then
-      # Distinguish the analyzer from LZ4's `lizard`: --version on the analyzer
-      # prints "Lizard command line interface ...", LZ4's prints LZ4-style help.
-      if "$cmd" --version 2>&1 | grep -qi "Lizard command line interface"; then
-        LIZARD_BIN="$(command -v "$cmd")"
-        break
-      fi
-    fi
-  done
-fi
 if [ -z "$LIZARD_BIN" ]; then
   cat >&2 <<EOF
-[check-ccn-allowlist] lizard analyzer not found.
-
-Install one of:
-  python3 -m venv /tmp/lizvenv && /tmp/lizvenv/bin/pip install lizard -q
-  brew install lizard-analyzer    # conflicts with brew install lizard (LZ4)
-  pipx install lizard
+[check-ccn-allowlist] lizard analyzer ${LIZARD_VERSION} not found.
+${REJECTED:+
+Candidates present but rejected (not the pinned analyzer):
+$REJECTED}
+Install the pinned version:
+  python3 -m venv /tmp/lizvenv && /tmp/lizvenv/bin/pip install -q "lizard==${LIZARD_VERSION}"
+  pipx install "lizard==${LIZARD_VERSION}"
 
 Note: 'brew install lizard' installs an LZ4 compression tool, NOT this
 analyzer. See docs/quality/<date>/complexity/ for the project standard.
