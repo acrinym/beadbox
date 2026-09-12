@@ -28,8 +28,8 @@ import {
 } from "lucide-react"
 import posthog from "posthog-js"
 import { useCallback, useEffect, useRef, useState, useTransition } from "react"
+import { useActiveWorkspace } from "../hooks/use-active-workspace"
 import { useAppHealth } from "../hooks/use-app-health"
-import { safeCapture } from "../lib/posthog-safe"
 import { useUpdateChecker } from "../hooks/use-update-checker"
 import {
   getAnalyticsEnabled,
@@ -50,6 +50,7 @@ import {
   type ThemeVariant,
   type UpdateCheckFrequency,
 } from "../lib/local-storage"
+import { safeCapture } from "../lib/posthog-safe"
 import { rpc } from "../lib/rpc"
 import type {
   FormulaDetail,
@@ -60,7 +61,7 @@ import type {
   Workspace,
 } from "../lib/types"
 import { cn } from "../lib/utils"
-import { getWorkspaceCookie, setWorkspaceCookie } from "../lib/workspace-cookie"
+import { setWorkspaceCookie } from "../lib/workspace-cookie"
 import { FormulaDag } from "./formula-dag"
 import { FormulaPourModal } from "./formula-pour-modal"
 import { FormulaPreviewModal } from "./formula-preview-modal"
@@ -196,7 +197,8 @@ export function FormulasView() {
   const { workspaces: initialWorkspaces } = useWorkspaceGate()
   const router = useRouter()
   const [workspaces] = useState<Workspace[]>(initialWorkspaces)
-  const [currentWorkspace, setCurrentWorkspace] = useState<Workspace | null>(null)
+  // Cookie-resolved active workspace (subscribed — see use-active-workspace).
+  const [currentWorkspace, setCurrentWorkspace] = useActiveWorkspace(workspaces)
   const hasTrains = useHasTrains(currentWorkspace?.databasePath)
   const [loadingWorkspaceId, setLoadingWorkspaceId] = useState<string | null>(null)
   const [isPending, startTransition] = useTransition()
@@ -323,13 +325,6 @@ export function FormulasView() {
     if (!isTauriRef.current) return
     document.documentElement.style.zoom = `${zoomLevel}%`
   }, [zoomLevel])
-
-  // Initialize workspace
-  useEffect(() => {
-    const savedId = getWorkspaceCookie()
-    const found = workspaces.find((w) => w.id === savedId)
-    setCurrentWorkspace(found || workspaces[0] || null)
-  }, [workspaces])
 
   const databasePath = currentWorkspace?.databasePath
 
