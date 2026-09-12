@@ -184,6 +184,7 @@ function buildTauriRpc(): RemoteApi {
     recovery: namespaceProxy("recovery"),
     subscribe: namespaceProxy("subscribe"),
     system: namespaceProxy("system"),
+    trains: namespaceProxy("trains"),
     workspaces: namespaceProxy("workspaces"),
   } satisfies Record<keyof RemoteApi, unknown>
 
@@ -215,6 +216,7 @@ function buildStubRpc(): RemoteApi {
     recovery: namespaceStub("recovery"),
     subscribe: namespaceStub("subscribe"),
     system: namespaceStub("system"),
+    trains: namespaceStub("trains"),
     workspaces: namespaceStub("workspaces"),
   } as unknown as RemoteApi
 }

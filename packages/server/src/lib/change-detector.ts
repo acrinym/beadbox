@@ -55,6 +55,7 @@ import { basename, dirname, join, resolve } from "path"
 import { SUBSCRIPTION_PREFIX, type SubscriptionEvent } from "../subscribe-protocol"
 import { buildServerEnv, getWorkspacePassword } from "./bd"
 import { resolveBdPath } from "./bd-paths"
+import { beadsDirFromDatabasePath } from "./beadtrain-fs"
 import { drainPool, getPool, PortFileMissingError } from "./dolt-pool"
 import { getDoltDir, getWorkspaceWriteMarkerPaths } from "./dolt-write-marker"
 import { parseServerUri } from "./workspace-registry"
@@ -326,6 +327,7 @@ interface DetectorState {
   dbPath: string
   emit: EmitFn
   fsWatcher: FSWatcher | null
+  trainWatcher: FSWatcher | null
   debounceTimer: ReturnType<typeof setTimeout> | null
   pollTimer: ReturnType<typeof setInterval> | null
   pollInFlight: boolean
@@ -365,6 +367,19 @@ async function emitIfChanged(
 // emitIfChanged then content-hashes the manifest to suppress mtime-only
 // events (GC touches manifest mtime without changing its contents).
 const FS_WATCH_FILENAME_ALLOWLIST = new Set(["manifest"])
+
+// beadbox-if6 (PR #37): .beadtrain plans live at <workspace>/.beads/*.beadtrain
+// and one directory down -- OUTSIDE the Dolt root the watcher above is rooted
+// at, so no allowlist entry could ever have made them live. They get their own
+// watcher. Deliberately NOT part of getChangeFingerprint: that path is tuned
+// to hash ~150 bytes (beadbox-v7l) and must not readdir or read plan files.
+// The filter is a string check per event, zero I/O, so Dolt churn under the
+// same root costs one compare and nothing else.
+export function isTrainFile(filename: string | null): boolean {
+  // basename for the same portability reason as onFsEvent: macOS gives a
+  // relative path, Windows often just the leaf.
+  return !!filename && basename(filename).endsWith(".beadtrain")
+}
 
 function startEmbeddedLoop(state: DetectorState): void {
   // fs.watch is rooted at the Dolt root (same scope as bb-onv3.9). The
@@ -412,6 +427,32 @@ function startEmbeddedLoop(state: DetectorState): void {
     }
   } else {
     console.warn(`Dolt directory not found: ${doltDir} (using polling only)`)
+  }
+
+  // Train plans: emit DIRECTLY after debounce. emitIfChanged() compares
+  // fingerprints, and plan files are intentionally not in the fingerprint,
+  // so routing through it would emit nothing. A workspace with no plans
+  // produces no matching events, so this costs nothing there.
+  const beadsDir = beadsDirFromDatabasePath(state.dbPath)
+  if (beadsDir && existsSync(beadsDir)) {
+    try {
+      state.trainWatcher = watch(beadsDir, { recursive: true }, (_ev, filename) => {
+        if (state.stopped || !isTrainFile(filename)) return
+        const trigger = filename as string
+        if (state.debounceTimer) clearTimeout(state.debounceTimer)
+        state.debounceTimer = setTimeout(() => {
+          if (state.stopped) return
+          state.lastNotify = Date.now()
+          state.emit({ type: "change", timestamp: state.lastNotify, trigger })
+        }, getEmbeddedDebounceMs())
+      })
+      state.trainWatcher.on("error", (err) => {
+        console.warn(`fs.watch error for ${beadsDir} (train plans): ${err.message}`)
+        state.trainWatcher = null
+      })
+    } catch (err: unknown) {
+      console.warn(`fs.watch failed for ${beadsDir} (train plans): ${err instanceof Error ? err.message : String(err)}`)
+    }
   }
 
   state.pollTimer = setInterval(async () => {
@@ -731,6 +772,7 @@ export async function createChangeDetector(
     dbPath: workspacePath,
     emit,
     fsWatcher: null,
+    trainWatcher: null,
     debounceTimer: null,
     pollTimer: null,
     pollInFlight: false,
@@ -796,6 +838,14 @@ export async function createChangeDetector(
           /* already closed */
         }
         state.fsWatcher = null
+      }
+      if (state.trainWatcher) {
+        try {
+          state.trainWatcher.close()
+        } catch {
+          /* already closed */
+        }
+        state.trainWatcher = null
       }
       // bb-xe8g: tear down the shell-spawn poll child. SIGTERM gives the
       // child its exit handler chance; if it doesn't exit within ~250ms

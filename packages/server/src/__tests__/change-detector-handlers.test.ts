@@ -25,6 +25,7 @@ interface MutableState {
   dbPath: string
   emit: (event: SubscriptionEvent) => void
   fsWatcher: null
+  trainWatcher: null
   debounceTimer: null
   pollTimer: null
   pollInFlight: boolean
@@ -50,6 +51,7 @@ function makeState(over: Partial<MutableState> = {}): MutableState & {
     dbPath: "/tmp/test/.beads",
     emit: (event: SubscriptionEvent) => emitted.push(event),
     fsWatcher: null,
+    trainWatcher: null,
     debounceTimer: null,
     pollTimer: null,
     pollInFlight: false,

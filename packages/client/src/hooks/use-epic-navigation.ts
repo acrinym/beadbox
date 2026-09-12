@@ -2,6 +2,7 @@ import { useNavigate } from "@tanstack/react-router"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { Filters } from "@/components/filter-bar"
 import { dispatchKeyDown, type KeyNavContext } from "@/lib/epic-navigation-keys"
+import { useHasTrains } from "@/hooks/use-has-trains"
 import { countAllBeads, findBeadById, findParentPath } from "@/lib/epic-tree-utils"
 import { safeCapture } from "@/lib/posthog-safe"
 import {
@@ -78,6 +79,11 @@ export function useEpicNavigation(opts: UseEpicNavigationOpts) {
     hasRealEpics,
     treeContainerRef,
   } = opts
+
+  // beadbox-if6: Cmd/Ctrl+4 exists only when the workspace has .beadtrain files.
+  const hasTrains = useHasTrains(currentWorkspace?.databasePath)
+  const hasTrainsRef = useRef(hasTrains)
+  hasTrainsRef.current = hasTrains
 
   const navigate = useNavigate()
   const router = {
@@ -482,6 +488,7 @@ export function useEpicNavigation(opts: UseEpicNavigationOpts) {
         vimEnabled,
         zoomLevel,
         isTauri: !!isTauriRef.current,
+        hasTrains: hasTrainsRef.current,
         setFocusedItemId,
         setFocusedPanel,
         handleToggleEpic,

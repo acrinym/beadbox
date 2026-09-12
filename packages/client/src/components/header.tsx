@@ -22,12 +22,14 @@ import {
   RefreshCw,
   ServerCrash,
   Settings,
+  TrainFront,
 } from "lucide-react"
 import posthog from "posthog-js"
 import { isFeatureEnabled } from "@/lib/feature-flag"
 import { safeCapture } from "@/lib/posthog-safe"
 import { Fragment, useCallback, useEffect, useState } from "react"
 import type { AppHealth } from "../hooks/use-app-health"
+import { useHasTrains } from "@/hooks/use-has-trains"
 import { useViewport } from "../hooks/use-viewport"
 import { ERROR_CATEGORY_TITLES } from "../lib/epic-tree-utils"
 import {
@@ -168,6 +170,7 @@ export function Header({
   const [showHint, setShowHint] = useState(false)
   const [healthDetailsOpen, setHealthDetailsOpen] = useState(false)
   const [formulasEnabled, setFormulasEnabled] = useState(false)
+  const hasTrains = useHasTrains(currentWorkspace.databasePath)
 
   useEffect(() => {
     const check = () => isFeatureEnabled("enable-formulas")
@@ -354,6 +357,25 @@ export function Header({
                   {formulasEnabled ? "Formulas \u2318\u0033" : "Formulas (early access)"}
                 </TooltipContent>
               </Tooltip>
+              {hasTrains && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    onClick={() => navigateTo("trains", "tab")}
+                    className={cn(
+                      "px-2.5 py-1.5 text-sm font-medium rounded-md transition-colors inline-flex items-center gap-1.5",
+                      pathname === "/trains"
+                        ? "bg-accent text-foreground"
+                        : "text-muted-foreground hover:text-foreground hover:bg-accent/50",
+                    )}
+                  >
+                    <TrainFront className="h-3.5 w-3.5" />
+                    Trains
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>Trains ⌘4</TooltipContent>
+              </Tooltip>
+              )}
             </div>
           )}
         </div>

@@ -1,4 +1,5 @@
 import { useNavigate } from "@tanstack/react-router"
+import { useHasTrains } from "@/hooks/use-has-trains"
 import { X } from "lucide-react"
 import posthog from "posthog-js"
 import { isFeatureEnabled } from "@/lib/feature-flag"
@@ -55,6 +56,7 @@ function ActivityViewer() {
   // still drives the toast/badge surface for real bd failures.
   const [workspaces] = useState<Workspace[]>(initialWorkspaces)
   const [currentWorkspace, setCurrentWorkspace] = useState<Workspace | null>(null)
+  const hasTrains = useHasTrains(currentWorkspace?.databasePath)
   const [loadingWorkspaceId, setLoadingWorkspaceId] = useState<string | null>(null)
   const [isPending, startTransition] = useTransition()
   // Manual refresh signal (handleRefresh below) + subscription-driven signal
@@ -497,16 +499,17 @@ function ActivityViewer() {
       }
 
       // Cmd+1/Cmd+2/Cmd+3: view switching (always active)
-      if ((e.metaKey || e.ctrlKey) && (e.key === "1" || e.key === "2" || e.key === "3")) {
+      if ((e.metaKey || e.ctrlKey) && (e.key === "1" || e.key === "2" || e.key === "3" || e.key === "4")) {
         e.preventDefault()
         if (e.key === "1") {
           navigate({ to: "/" })
         }
         if (e.key === "3") {
           const enabled = isFeatureEnabled("enable-formulas")
-          // TanStack Router types are derived from generated routeTree;
-          // /formulas lands in P3.5. Cast until that route file ships.
           if (enabled) navigate({ to: "/formulas" as never })
+        }
+        if (e.key === "4" && hasTrains) {
+          navigate({ to: "/trains" as never })
         }
         return
       }
@@ -615,6 +618,7 @@ function ActivityViewer() {
     return () => window.removeEventListener("keydown", handleKeyDown)
   }, [
     navigate,
+    hasTrains,
     isFiltered,
     clearFilter,
     agentFocusMode,

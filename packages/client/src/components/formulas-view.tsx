@@ -13,6 +13,7 @@
 
 import { useQuery } from "@tanstack/react-query"
 import { useRouter } from "@tanstack/react-router"
+import { useHasTrains } from "@/hooks/use-has-trains"
 import {
   Activity,
   AlertTriangle,
@@ -196,6 +197,7 @@ export function FormulasView() {
   const router = useRouter()
   const [workspaces] = useState<Workspace[]>(initialWorkspaces)
   const [currentWorkspace, setCurrentWorkspace] = useState<Workspace | null>(null)
+  const hasTrains = useHasTrains(currentWorkspace?.databasePath)
   const [loadingWorkspaceId, setLoadingWorkspaceId] = useState<string | null>(null)
   const [isPending, startTransition] = useTransition()
 
@@ -485,16 +487,17 @@ export function FormulasView() {
         setSettingsOpen(true)
         return
       }
-      if ((e.metaKey || e.ctrlKey) && (e.key === "1" || e.key === "2")) {
+      if ((e.metaKey || e.ctrlKey) && (e.key === "1" || e.key === "2" || e.key === "4")) {
         e.preventDefault()
         if (e.key === "1") router.navigate({ to: "/" as never })
         if (e.key === "2") router.navigate({ to: "/activity" as never })
+        if (e.key === "4" && hasTrains) router.navigate({ to: "/trains" as never })
         return
       }
     }
     window.addEventListener("keydown", handleKeyDown)
     return () => window.removeEventListener("keydown", handleKeyDown)
-  }, [router])
+  }, [router, hasTrains])
 
   // Track page view
   useEffect(() => {

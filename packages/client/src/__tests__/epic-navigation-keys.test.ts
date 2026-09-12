@@ -63,6 +63,7 @@ const makeCtx = (overrides: Partial<KeyNavContext> = {}): KeyNavContext => {
     vimEnabled: false,
     zoomLevel: 100,
     isTauri: false,
+    hasTrains: false,
     setFocusedItemId: mock(() => {}),
     setFocusedPanel: mock(() => {}),
     handleToggleEpic: mock(() => {}),
@@ -189,6 +190,18 @@ describe("handleGlobalShortcut", () => {
     expect(handleGlobalShortcut(fireKey("3", { metaKey: true }), ctx)).toBe(true)
     expect(ctx.router.push).toHaveBeenCalledWith("/formulas")
     window.localStorage.removeItem("beadbox_flag_overrides")
+  })
+
+  test("Cmd+4 navigates to /trains when the workspace has plans", () => {
+    const ctx = makeCtx({ hasTrains: true })
+    expect(handleGlobalShortcut(fireKey("4", { metaKey: true }), ctx)).toBe(true)
+    expect(ctx.router.push).toHaveBeenCalledWith("/trains")
+  })
+
+  test("Cmd+4 does nothing when the workspace has no plans (zero footprint)", () => {
+    const ctx = makeCtx({ hasTrains: false })
+    handleGlobalShortcut(fireKey("4", { metaKey: true }), ctx)
+    expect(ctx.router.push).not.toHaveBeenCalledWith("/trains")
   })
 
   test("Cmd+3 with flag off does not navigate", () => {

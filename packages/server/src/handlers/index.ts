@@ -26,6 +26,7 @@ import * as molecules from "./molecules"
 import * as recovery from "./recovery"
 import * as subscribe from "./subscribe"
 import * as system from "./system"
+import * as trains from "./trains"
 import * as workspaces from "./workspaces"
 
 // Per bb-3pqz, every kkrpc handler is wrapped in a 30s timeout race so a
@@ -48,6 +49,7 @@ export const handlers = {
   recovery: wrapNamespace(recovery, "recovery"),
   subscribe,
   system: wrapNamespace(system, "system"),
+  trains: wrapNamespace(trains, "trains"),
   workspaces: wrapNamespace(workspaces, "workspaces"),
 } as const
 

@@ -25,7 +25,7 @@ import { mkdir, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { getChangeFingerprint } from "../lib/change-detector"
+import { getChangeFingerprint, isTrainFile } from "../lib/change-detector"
 
 let tmpRoot: string
 
@@ -160,5 +160,28 @@ describe("getChangeFingerprint (beadbox-v7l)", () => {
     await writeFile(lastTouched, "different-bead-id-from-bd-show")
     const fp2 = await getChangeFingerprint(join(tmpRoot, ".beads"))
     expect(fp1).toBe(fp2)
+  })
+
+  test("getChangeFingerprint is UNCHANGED by a .beadtrain edit (hot path stays v7l-sized)", async () => {
+    // beadbox-if6: plan files are watched separately; they must never enter
+    // the fingerprint, which is read on every poll tick and fs event.
+    await setupServerLayout(tmpRoot, "bb")
+    const trainDir = join(tmpRoot, ".beads", "plans")
+    await mkdir(trainDir, { recursive: true })
+    const train = join(trainDir, "demo.beadtrain")
+    await writeFile(train, '[train]\nname = "before"\n')
+    const fp1 = await getChangeFingerprint(join(tmpRoot, ".beads"))
+    await writeFile(train, '[train]\nname = "after"\n')
+    const fp2 = await getChangeFingerprint(join(tmpRoot, ".beads"))
+    expect(fp2).toBe(fp1)
+    expect(fp1).not.toContain("beadtrain")
+  })
+
+  test("isTrainFile matches plan files in both fs.watch filename shapes", () => {
+    expect(isTrainFile("demo.beadtrain")).toBe(true)              // Windows leaf
+    expect(isTrainFile("plans/demo.beadtrain")).toBe(true)        // macOS relative
+    expect(isTrainFile("dolt/bb/.dolt/noms/manifest")).toBe(false)
+    expect(isTrainFile("issues.jsonl")).toBe(false)
+    expect(isTrainFile(null)).toBe(false)
   })
 })
