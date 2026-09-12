@@ -28,7 +28,7 @@ import {
   setActiveWorkspaceAction,
   setWorkspaceLabel,
 } from "../handlers/workspaces"
-import { readRegistry } from "../lib/workspace-registry"
+import { addWorkspace, readRegistry } from "../lib/workspace-registry"
 
 const ORIGINAL_REGISTRY_PATH = process.env.BEADBOX_REGISTRY_PATH
 const ORIGINAL_BEADS_REGISTRY_PATH = process.env.BEADS_REGISTRY_PATH
@@ -580,5 +580,56 @@ describe("registry write serialization", () => {
     const mode = (await stat(sandboxRegistry)).mode & 0o777
     expect(mode).toBe(0o600)
     expect((await readdir(sandboxDir)).filter((f) => f.endsWith(".tmp"))).toEqual([])
+  })
+
+  // beadbox-6q7: a v1 registry (no version field) is migrated in memory on
+  // read. The migration used to persist itself with a fire-and-forget write,
+  // which the #33 queue turned into a write at the queue TAIL — landing after
+  // any mutation queued meanwhile and reverting it with the pre-mutation
+  // snapshot. These two tests can only be reached with a v1 seed; every other
+  // seed in this file writes version: 2.
+  function seedV1(prePath: string): Promise<void> {
+    return writeRegistry({
+      workspaces: [{ path: prePath, name: "pre", addedAt: "2026-01-01" }],
+      activeWorkspace: prePath,
+    })
+  }
+
+  test("two mutations racing the v1 migration both survive", async () => {
+    const pre = await makeBeadsDir("pre")
+    const a = await makeBeadsDir("a")
+    const b = await makeBeadsDir("b")
+    await seedV1(pre)
+
+    const [idA, idB] = await Promise.all([addWorkspace(a, "A"), addWorkspace(b, "B")])
+    expect(idA).not.toBe(idB)
+    // Drain the queue: the reverting write (when present) is queued BEHIND the
+    // second mutation, so it lands after Promise.all resolves. A no-op
+    // mutation (re-adding A dedups to the existing id) waits behind it.
+    expect(await addWorkspace(a, "A")).toBe(idA)
+
+    const onDisk = JSON.parse(await readFile(sandboxRegistry, "utf-8"))
+    expect(onDisk.version).toBe(2)
+    const paths = onDisk.workspaces.map((w: { local: { path: string } | null }) => w.local?.path)
+    expect(paths).toEqual([pre, a, b])
+    // activeWorkspace was remapped from the v1 path to the migrated entry's id.
+    expect(onDisk.activeWorkspace).toBe(onDisk.workspaces[0].id)
+  })
+
+  test("a plain read of a v1 registry persists v2 before returning, with stable ids", async () => {
+    const pre = await makeBeadsDir("pre")
+    await seedV1(pre)
+
+    const first = await readRegistry()
+    expect(first.version).toBe(2)
+    const onDisk = JSON.parse(await readFile(sandboxRegistry, "utf-8"))
+    expect(onDisk.version).toBe(2)
+    expect(onDisk.workspaces[0].id).toBe(first.workspaces[0].id)
+
+    // Ids are minted during migration; a second read must see the persisted
+    // ones, not mint another set (the client's cookie holds the id).
+    const second = await readRegistry()
+    expect(second.workspaces[0].id).toBe(first.workspaces[0].id)
+    expect(second.activeWorkspace).toBe(first.activeWorkspace)
   })
 })

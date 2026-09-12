@@ -178,6 +178,32 @@ function emptyRegistry(): WorkspaceRegistry {
  * the legacy ~/.beads/registry.json.
  */
 export async function readRegistry(): Promise<WorkspaceRegistry> {
+  return serializeRegistryTask(async () => {
+    const { registry, migrated } = await readRegistryUnqueued()
+    if (migrated) {
+      // Persist the migration inside the same queued task that produced it, so
+      // nothing can slip between the migration and its write, and the ids it
+      // minted are what every later read (and the client's cookie) sees.
+      // A failure keeps the read available — the next read re-migrates.
+      try {
+        await writeRegistryFile(registry)
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error)
+        console.error(`[beadbox-registry] could not persist migrated registry: ${reason}`)
+      }
+    }
+    return registry
+  })
+}
+
+/**
+ * The read itself, with no queue involvement. Only for code that already holds
+ * the queue (mutateRegistry) — the exported readRegistry is a queued task and
+ * would deadlock if awaited from inside another one. `migrated` is true when
+ * the registry on disk is not the v2 shape returned here (a v1 file, or the
+ * legacy ~/.beads registry) and therefore still needs to be written.
+ */
+async function readRegistryUnqueued(): Promise<{ registry: WorkspaceRegistry; migrated: boolean }> {
   const registryPath = getBeadboxRegistryPath()
 
   let content: string | null = null
@@ -214,7 +240,7 @@ export async function readRegistry(): Promise<WorkspaceRegistry> {
     if (parsed !== null) {
       const record = parsed as Partial<WorkspaceRegistry> & Partial<V1Registry>
       if (record.version === 2) {
-        return deduplicateEntries(parsed as WorkspaceRegistry)
+        return { registry: deduplicateEntries(parsed as WorkspaceRegistry), migrated: false }
       }
       // v1 registry (no version field): migrate
       const v1: V1Registry = {
@@ -223,21 +249,24 @@ export async function readRegistry(): Promise<WorkspaceRegistry> {
           : [],
         activeWorkspace: typeof record.activeWorkspace === "string" ? record.activeWorkspace : null,
       }
-      return deduplicateEntries(migrateV1ToV2(v1))
+      return { registry: deduplicateEntries(migrateV1ToV2(v1)), migrated: true }
     }
   }
 
   // No registry (or an unusable one): attempt migration from legacy registry
   const legacy = await migrateFromLegacyRegistry()
   if (legacy.workspaces.length > 0) {
-    return deduplicateEntries(
-      migrateV1ToV2({
-        workspaces: legacy.workspaces,
-        activeWorkspace: legacy.activeWorkspace,
-      }),
-    )
+    return {
+      registry: deduplicateEntries(
+        migrateV1ToV2({
+          workspaces: legacy.workspaces,
+          activeWorkspace: legacy.activeWorkspace,
+        }),
+      ),
+      migrated: true,
+    }
   }
-  return emptyRegistry()
+  return { registry: emptyRegistry(), migrated: false }
 }
 
 async function quarantineUnreadableRegistry(registryPath: string, reason: string): Promise<void> {
@@ -347,9 +376,10 @@ export async function writeRegistry(registry: WorkspaceRegistry): Promise<void> 
  * that pair leaves a window in which a concurrent mutation is lost.
  *
  * `mutate` MUST NOT call another exported mutator (addWorkspace,
- * setActiveWorkspace, updateWorkspaceLabel, ...): the queue is a single
- * non-reentrant chain, so a nested task waits for the task that is already
- * holding it and both hang forever.
+ * setActiveWorkspace, updateWorkspaceLabel, ...) or the exported readRegistry:
+ * all of them are queued tasks and the queue is a single non-reentrant chain,
+ * so a nested task waits for the task that is already holding it and both
+ * hang forever. Inside a task, read with readRegistryUnqueued.
  *
  * The queue is per-process. A second sidecar process writing the same file is
  * not serialized against this one; the skip-if-unchanged below and the
@@ -360,13 +390,17 @@ export async function mutateRegistry<T>(
   mutate: (registry: WorkspaceRegistry) => T | Promise<T>,
 ): Promise<T> {
   return serializeRegistryTask(async () => {
-    const registry = await readRegistry()
+    // Unqueued on purpose: this task already holds the queue, and the exported
+    // readRegistry is itself a queued task.
+    const { registry, migrated } = await readRegistryUnqueued()
     const before = JSON.stringify(registry)
     const result = await mutate(registry)
     // Skip the write when the mutator changed nothing (unknown workspace id,
     // empty patch, remove of an absent entry). Rewriting the whole file for a
     // no-op would clobber whatever another process wrote since our read.
-    if (JSON.stringify(registry) !== before) await writeRegistryFile(registry)
+    // A migrated read is the exception: the v2 shape is not on disk yet, and
+    // this task is the one place it can be written without a second writer.
+    if (migrated || JSON.stringify(registry) !== before) await writeRegistryFile(registry)
     return result
   })
 }
@@ -401,10 +435,11 @@ function migrateV1ToV2(v1: V1Registry): WorkspaceRegistry {
     activeWorkspace = idMap.get(v1.activeWorkspace) ?? null
   }
 
-  const v2: WorkspaceRegistry = { version: 2, activeWorkspace, workspaces }
-  // Write v2 atomically (fire and forget; next read will re-migrate if this fails)
-  writeRegistry(v2).catch(() => {})
-  return v2
+  // Pure: persisting the migrated registry is the reader's job (see
+  // readRegistry / mutateRegistry). This used to fire a write of its own; once
+  // writes were serialized (#33) that write queued BEHIND any mutation already
+  // waiting and reverted it with this pre-mutation snapshot (beadbox-6q7).
+  return { version: 2, activeWorkspace, workspaces }
 }
 
 // ---------------------------------------------------------------------------
