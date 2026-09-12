@@ -30,6 +30,7 @@ import posthog from "posthog-js"
 import { useCallback, useEffect, useRef, useState, useTransition } from "react"
 import { useActiveWorkspace } from "../hooks/use-active-workspace"
 import { useAppHealth } from "../hooks/use-app-health"
+import { safeCapture } from "../lib/posthog-safe"
 import { useUpdateChecker } from "../hooks/use-update-checker"
 import {
   getAnalyticsEnabled,
@@ -50,7 +51,6 @@ import {
   type ThemeVariant,
   type UpdateCheckFrequency,
 } from "../lib/local-storage"
-import { safeCapture } from "../lib/posthog-safe"
 import { rpc } from "../lib/rpc"
 import type {
   FormulaDetail,

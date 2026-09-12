@@ -9,6 +9,8 @@ Beadbox gives `bd` users a visual interface for the things a terminal can't show
 
 ![Beadbox screenshot](docs/screenshot.png)
 
+![Resizable workspace rail: switch projects, rename a tab, pick an emoji](docs/rail-demo.gif)
+
 ## Features
 
 - **Epic tree** — hierarchical view of epics and child beads with status, priority, and progress at a glance
@@ -17,7 +19,7 @@ Beadbox gives `bd` users a visual interface for the things a terminal can't show
 - **Bead detail** — full descriptions, comments, dependencies, and workflow advancement in a side panel or modal
 - **Filters** — slice by status, type, priority, and assignee; filters persist across sessions
 - **Activity feed** — a timeline of what changed, by whom, across the workspace
-- **Multi-workspace** — switch between local `.beads/` projects and remote Dolt server connections
+- **Multi-workspace** — a rail of project tabs switches between local `.beads/` projects and remote Dolt servers; rename a tab, give it an emoji, and switching back is instant
 - **Keyboard-first** — power-user paths work without touching the mouse
 
 ## Install
