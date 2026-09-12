@@ -46,7 +46,50 @@ permissions:
   contents: read
 
 jobs:
+  # beadbox-8z0: ONE place where the tag is validated, because the value flows
+  # from `github.event.inputs.tag || github.ref_name` -- free text on a
+  # workflow_dispatch -- and downstream it reaches a git commit message, a
+  # download URL, and (now) generated Ruby in a public Homebrew tap that every
+  # user's brew evaluates. Anchored, validated once, passed forward: no job
+  # re-derives it.
+  validate-tag:
+    name: "Validate release tag"
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      version: ${{ steps.v.outputs.version }}
+      is_final: ${{ steps.v.outputs.is_final }}
+    steps:
+      - id: v
+        env:
+          RAW_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Accept a final (vX.Y.Z) or an RC (vX.Y.Z-rc.N) for BUILDING. Only a
+          # final may reach the Homebrew tap; is_final carries that decision so
+          # the cask job never re-parses the tag itself.
+          if printf '%s' "$RAW_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            IS_FINAL=true
+          elif printf '%s' "$RAW_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$'; then
+            IS_FINAL=false
+          else
+            echo "::error::TAG VALIDATION FAILED: '$RAW_TAG' is not vX.Y.Z or vX.Y.Z-rc.N."
+            echo "::error::Refusing to run. The tag reaches a commit message, a download URL, and generated Ruby in a public Homebrew tap, so it is validated before anything consumes it."
+            exit 1
+          fi
+          VERSION="${RAW_TAG#v}"; VERSION="${VERSION%%-rc.*}"
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::TAG VALIDATION FAILED: derived version '$VERSION' is not X.Y.Z."; exit 1
+          fi
+          echo "tag=$RAW_TAG"       >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION"   >> "$GITHUB_OUTPUT"
+          echo "is_final=$IS_FINAL" >> "$GITHUB_OUTPUT"
+          echo "tag validated: $RAW_TAG (version $VERSION, final=$IS_FINAL)"
   build-frontend:
+    needs: [validate-tag]
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -105,6 +148,7 @@ jobs:
           cargo check --release --manifest-path src-tauri/Cargo.toml
 
   test:
+    needs: [validate-tag]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -139,6 +183,7 @@ jobs:
         run: bun run test
 
   test-integration:
+    needs: [validate-tag]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -208,6 +253,7 @@ jobs:
 
   # ── Create draft release for build jobs to upload into ──
   create-draft:
+    needs: [validate-tag]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     permissions:
@@ -1494,3 +1540,191 @@ jobs:
         run: |
           gh release edit "${RELEASE_TAG}" --draft=false \
             --repo "${{ github.repository }}"
+
+  # ── Post-publish: the two steps that were the retired workflow's only reason
+  #    to exist. Folded here (beadbox-8z0) because release.yml is the workflow
+  #    that actually ships us; the retired two-stage promote workflow went
+  #    0-for-4 and was bypassed (beadbox-0cy).
+  #    Both run only after `promote` has made the release public.
+
+  publish-changelog:
+    name: "Publish changelog/<TAG>.md"
+    if: ${{ github.event_name == 'push' && needs.validate-tag.outputs.is_final == 'true' }}
+    needs: [validate-tag, promote]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the authored notes, verbatim
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.validate-tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          REPO="$GITHUB_REPOSITORY"
+          SRC="release-notes/${TAG}.md"
+          DEST="changelog/${TAG}.md"
+
+          # systemdesign 6.2: published VERBATIM -- no extraction, no synthesised
+          # heading. A missing source BLOCKS the release rather than shipping an
+          # empty in-app changelog nobody notices.
+          if ! gh api "repos/${REPO}/contents/${SRC}" --jq '.content' > /tmp/notes.b64 2>/tmp/notes.err; then
+            echo "::error::Release notes not found at ${SRC}."
+            echo "::error::They are authored per pm/systemdesign.md 6.2 and must exist before a release publishes."
+            sed 's/^/  /' /tmp/notes.err || true
+            exit 1
+          fi
+          tr -d '\n' < /tmp/notes.b64 | base64 -d > /tmp/changelog.md
+          if [ ! -s /tmp/changelog.md ]; then
+            echo "::error::${SRC} exists but is empty -- refusing to publish an empty changelog."; exit 1
+          fi
+          echo "Publishing ${SRC} -> ${DEST} ($(wc -c < /tmp/changelog.md) bytes)"
+
+          CONTENT=$(base64 -w0 /tmp/changelog.md)
+          SHA=$(gh api "repos/${REPO}/contents/${DEST}" --jq '.sha' 2>/dev/null || echo "")
+          if [ -n "$SHA" ]; then
+            gh api "repos/${REPO}/contents/${DEST}" -X PUT \
+              -f message="docs: add changelog for ${TAG}" -f content="$CONTENT" -f sha="$SHA" --silent
+          else
+            gh api "repos/${REPO}/contents/${DEST}" -X PUT \
+              -f message="docs: add changelog for ${TAG}" -f content="$CONTENT" --silent
+          fi
+
+          # AC-5: assert the ARTIFACT, not the exit code. Branch on the API's exit
+          # status -- it prints its error JSON to stdout, so testing for empty
+          # output reports a missing file as present (beadbox-l5i.6.4).
+          if ! SIZE=$(gh api "repos/${REPO}/contents/${DEST}" --jq '.size' 2>/dev/null); then
+            echo "::error::${DEST} is not present after publishing it. The in-app update dialog reads this exact path."; exit 1
+          fi
+          case "$SIZE" in ''|*[!0-9]*) echo "::error::unexpected size response for ${DEST}: '${SIZE}'"; exit 1 ;; esac
+          [ "$SIZE" -gt 0 ] || { echo "::error::${DEST} published but is empty (${SIZE} bytes)."; exit 1; }
+          echo "Verified ${DEST} present in ${REPO} (${SIZE} bytes)"
+
+      - name: Confirm the release resolves by ID, then by tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.validate-tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Drafts are not addressable by tag -- GET /releases/tags/<tag> 404s on
+          # one, which is what killed the retired workflow three times. By this
+          # point `promote` has published it, so the tag MUST resolve; if it does
+          # not, the release is not actually public and we say so.
+          ID=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+                 --jq '.[] | select(.tag_name==env.TAG) | .id' | head -1)
+          [ -n "$ID" ] || { echo "::error::no release object found for $TAG"; exit 1; }
+          echo "release id: $ID"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq '.id' >/dev/null \
+            || { echo "::error::$TAG does not resolve by tag -- the release is still a draft."; exit 1; }
+          echo "confirmed: $TAG resolves by id and by tag"
+
+  publish-cask:
+    name: "Update the Homebrew cask"
+    # push-only: a workflow_dispatch takes a free-text tag, and this is the job
+    # that writes Ruby into a public tap. environment: release is what gates the
+    # secret (its ref policy admits only v* tags and main), matching every other
+    # secret-bearing job in this file.
+    environment: release
+    if: ${{ github.event_name == 'push' && needs.validate-tag.outputs.is_final == 'true' }}
+    needs: [validate-tag, promote]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # No same-repo write: the only credential here is scoped to another
+    # repository, and giving this job repo write would blur that separation.
+    permissions:
+      contents: read
+    steps:
+      - name: Fetch the DMG and compute its digest
+        id: dmg
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.validate-tag.outputs.tag }}
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          NAME="Beadbox-${VERSION}-macOS-arm64.dmg"
+          ID=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" \
+                 --jq ".assets[] | select(.name==\"$NAME\") | .id")
+          [ -n "$ID" ] || { echo "::error::release $TAG has no asset named $NAME"; exit 1; }
+          gh api -H "Accept: application/octet-stream" \
+            "repos/$GITHUB_REPOSITORY/releases/assets/$ID" > "$NAME"
+
+          # An empty or truncated download would otherwise be hashed into the tap
+          # and break `brew install` for every user until someone noticed.
+          BYTES=$(wc -c < "$NAME")
+          [ "$BYTES" -gt 0 ] || { echo "::error::$NAME downloaded as 0 bytes"; exit 1; }
+          SHA=$(sha256sum "$NAME" | cut -d' ' -f1)
+          printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{64}$' \
+            || { echo "::error::computed digest is not 64 hex characters: '$SHA'"; exit 1; }
+          echo "asset  : $NAME"
+          echo "bytes  : $BYTES"
+          echo "sha256 : $SHA"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Render the cask from the template and push it
+        env:
+          GH_TOKEN: ${{ secrets.CASK_PAT }}
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+          SHA256: ${{ steps.dmg.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # Casks/beadbox.rb is GENERATED, not source: this job rewrites the whole
+          # file every release. A hand-patch to the tap therefore has an unrecorded
+          # expiry date -- it survives until the next tag and is then silently
+          # reverted. Fixes belong HERE. beadbox-hly (refuse on Intel) and
+          # beadbox-32n (the deprecated depends_on macos: string form) are carried
+          # in the template below for exactly that reason.
+          # Rendered by substitution into a template, never sed -i into a file
+          # whose contents are code.
+          rm -rf /tmp/cask
+          git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/beadbox/homebrew-cask.git" /tmp/cask
+
+          cat > /tmp/cask/Casks/beadbox.rb <<CASK
+          cask "beadbox" do
+            version "__VERSION__"
+
+            arch arm: "arm64"
+
+            sha256 "__SHA256__"
+            url "https://github.com/beadbox/beadbox/releases/download/v#{version}/Beadbox-#{version}-macOS-arm64.dmg"
+
+            name "Beadbox"
+            desc "Desktop app for the beads issue tracker"
+            homepage "https://github.com/beadbox/beadbox"
+
+            depends_on arch: :arm64
+            depends_on macos: :ventura
+
+            app "Beadbox.app"
+
+            zap trash: [
+              "~/Library/Application Support/com.nmelo.beadbox",
+              "~/Library/Caches/com.nmelo.beadbox",
+              "~/Library/Preferences/com.nmelo.beadbox.plist",
+              "~/Library/Application Support/com.nmelo.beads-ui",
+              "~/Library/Caches/com.nmelo.beads-ui",
+              "~/Library/Preferences/com.nmelo.beads-ui.plist",
+            ]
+          end
+          CASK
+          # The heredoc is indented to match this file; strip that one level, then
+          # substitute. Both values are already validated: VERSION came from the
+          # anchored tag check, SHA256 was asserted 64-hex above.
+          sed -i 's/^          //' /tmp/cask/Casks/beadbox.rb
+          sed -i "s|__VERSION__|${VERSION}|; s|__SHA256__|${SHA256}|" /tmp/cask/Casks/beadbox.rb
+
+          grep -q '__VERSION__\|__SHA256__' /tmp/cask/Casks/beadbox.rb \
+            && { echo "::error::a template placeholder survived substitution"; exit 1; }
+          grep -Eq '^  sha256 "[0-9a-f]{64}"$' /tmp/cask/Casks/beadbox.rb \
+            || { echo "::error::rendered cask has no valid sha256 line"; exit 1; }
+          echo "--- rendered cask ---"; cat /tmp/cask/Casks/beadbox.rb
+
+          cd /tmp/cask
+          git config user.name "Beadbox"
+          git config user.email "hello@beadbox.app"
+          git add Casks/beadbox.rb
+          git diff --cached --quiet && { echo "cask already current for ${VERSION}; nothing to push"; exit 0; }
+          git commit -m "beadbox: update to ${VERSION}"
+          git push origin HEAD:main
+          echo "pushed cask ${VERSION}"
