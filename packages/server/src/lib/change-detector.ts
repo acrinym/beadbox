@@ -429,41 +429,6 @@ function startEmbeddedLoop(state: DetectorState): void {
     console.warn(`Dolt directory not found: ${doltDir} (using polling only)`)
   }
 
-  // Train plans: emit DIRECTLY after debounce. emitIfChanged() compares
-  // fingerprints, and plan files are intentionally not in the fingerprint,
-  // so routing through it would emit nothing. A workspace with no plans
-  // produces no matching events, so this costs nothing there.
-  const beadsDir = beadsDirFromDatabasePath(state.dbPath)
-  if (beadsDir && existsSync(beadsDir)) {
-    try {
-      state.trainWatcher = watch(beadsDir, { recursive: true }, (_ev, filename) => {
-        if (state.stopped || !isTrainFile(filename)) return
-        const trigger = filename as string
-        if (state.debounceTimer) clearTimeout(state.debounceTimer)
-        state.debounceTimer = setTimeout(() => {
-          if (state.stopped) return
-          state.lastNotify = Date.now()
-          state.emit({ type: "change", timestamp: state.lastNotify, trigger })
-        }, getEmbeddedDebounceMs())
-      })
-      state.trainWatcher.on("error", (err) => {
-        console.warn(`fs.watch error for ${beadsDir} (train plans): ${err.message}`)
-        state.trainWatcher = null
-      })
-    } catch (err: unknown) {
-      console.warn(`fs.watch failed for ${beadsDir} (train plans): ${err instanceof Error ? err.message : String(err)}`)
-    }
-  }
-
-  state.pollTimer = setInterval(async () => {
-    if (state.stopped || state.pollInFlight) return
-    state.pollInFlight = true
-    try {
-      await emitIfChanged(state, { type: "change", timestamp: Date.now() })
-    } finally {
-      state.pollInFlight = false
-    }
-  }, getPollIntervalMs())
 }
 
 // bb-fe03.6: setTimeout callback was 82 NLOC at CCN 29 — pool/fallback
@@ -786,6 +751,44 @@ export async function createChangeDetector(
     stopped: false,
     pollChild: null,
   }
+
+  // Train plans (beadbox-if6): watched in EVERY detection mode. This is pure
+  // fs on .beads/ and has no Dolt dependency, so it sits above the
+  // embedded/server dispatch. Emits DIRECTLY after debounce. emitIfChanged() compares
+  // fingerprints, and plan files are intentionally not in the fingerprint,
+  // so routing through it would emit nothing. A workspace with no plans
+  // produces no matching events, so this costs nothing there.
+  const beadsDir = beadsDirFromDatabasePath(state.dbPath)
+  if (beadsDir && existsSync(beadsDir)) {
+    try {
+      state.trainWatcher = watch(beadsDir, { recursive: true }, (_ev, filename) => {
+        if (state.stopped || !isTrainFile(filename)) return
+        const trigger = filename as string
+        if (state.debounceTimer) clearTimeout(state.debounceTimer)
+        state.debounceTimer = setTimeout(() => {
+          if (state.stopped) return
+          state.lastNotify = Date.now()
+          state.emit({ type: "change", timestamp: state.lastNotify, trigger })
+        }, getEmbeddedDebounceMs())
+      })
+      state.trainWatcher.on("error", (err) => {
+        console.warn(`fs.watch error for ${beadsDir} (train plans): ${err.message}`)
+        state.trainWatcher = null
+      })
+    } catch (err: unknown) {
+      console.warn(`fs.watch failed for ${beadsDir} (train plans): ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  state.pollTimer = setInterval(async () => {
+    if (state.stopped || state.pollInFlight) return
+    state.pollInFlight = true
+    try {
+      await emitIfChanged(state, { type: "change", timestamp: Date.now() })
+    } finally {
+      state.pollInFlight = false
+    }
+  }, getPollIntervalMs())
 
   if (mode === "embedded") {
     startEmbeddedLoop(state)
