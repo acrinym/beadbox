@@ -21,6 +21,11 @@
 #     already states the floor and the measured value, which is the useful
 #     part. CONTRIBUTING.md points here.
 #   - mutation-rust: cargo-mutants against src-tauri; floor 75%.
+#     DISABLED (always-false `if:` on the job) by Nelson ruling 2026-09-12:
+#     96 mutants x ~70 s against a 30-minute budget, and the mutants
+#     run 0 s of tests, so the job burned ~30 min of runner time per
+#     push for zero information. Config kept intact; beadbox-l5i.8
+#     owns the fix and re-enables it by deleting that one line.
 #   - mutation-server: Stryker on Bun via command-runner (bb-ystl.3 /
 #     QD.3); narrow initial scope (handlers/console.ts) because
 #     fixture-based suites don't survive Stryker's sandbox copy
@@ -252,6 +257,13 @@ jobs:
 
   mutation-rust:
     name: Mutation — src-tauri Rust (floor 75%)
+    # Disabled, not deleted (Nelson ruling 2026-09-12): 96 mutants x ~70 s
+    # does not fit the 30-minute budget, and each mutant runs 0 s of tests,
+    # so the job produced no signal. beadbox-l5i.8 restores it — remove the
+    # condition below once the mutant runs actually execute tests. It is
+    # spelled `!always()` (always false) because the workflow-hygiene gate's
+    # actionlint rejects a literal `if: false` as a constant condition.
+    if: ${{ !always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
