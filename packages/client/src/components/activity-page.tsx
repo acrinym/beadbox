@@ -303,63 +303,73 @@ function ActivityViewer() {
   // cache. The freshness stamp lives in the cache rather than in a ref so it
   // survives this route unmounting on every navigation away — otherwise the
   // card refetched and flashed its spinner on each return trip.
-  const fetchPipelineSnapshot = useCallback(async () => {
-    if (!databasePath) return
-    const now = Date.now()
-    const cached = sessionPipeline.get(currentWorkspaceId)
-    if (cached && now - cached.fetchedAt < PIPELINE_CACHE_MS) {
-      setStages(cached.stages)
-      setBeadStatusMap(cached.beadStatuses)
+  //
+  // The TTL only applies to a signal-less mount (beadbox-11i). A bd change
+  // signal — a real write, or the synthetic one a subscription emits when it
+  // (re)starts on a workspace switch — always refetches: the snapshot may
+  // predate an edit made from the CLI while this workspace was not the one
+  // being watched, and the cache must never outrank bd's own signal. The
+  // cached snapshot is still painted first so the card does not flash.
+  const fetchPipelineSnapshot = useCallback(
+    async (reason: "mount" | "signal") => {
+      if (!databasePath) return
+      const now = Date.now()
+      const cached = sessionPipeline.get(currentWorkspaceId)
+      if (cached) {
+        setStages(cached.stages)
+        setBeadStatusMap(cached.beadStatuses)
+        setPipelineLoading(false)
+        if (reason === "mount" && now - cached.fetchedAt < PIPELINE_CACHE_MS) return
+      }
+
+      try {
+        const result = await rpc.activity.listBeadsByStatus(databasePath)
+        // beadbox-8k3: pass the workspace's pipeline chain so the tile set
+        // reflects status.custom per pm/spec.md §4.9. Empty status.custom →
+        // just the 3 built-in tiles via composePipelineChain.
+        const derived = derivePipelineStages(result.beads, pipelineChain)
+        setStages(derived)
+        pipelineFetchedAtRef.current = now
+
+        // Build bead -> canonical pipeline stage map for cross-filter lookups.
+        // Backlog tile dropped per §4.9 strict-spec — P4 beads with
+        // status=open now map to the OPEN stage rather than a synthetic
+        // backlog stage. Priority filtering still lives in the filter-bar.
+        const statusMap = new Map<string, string>()
+        for (const bead of result.beads) {
+          statusMap.set(bead.id, toCanonicalStage(bead.status))
+        }
+        setBeadStatusMap(statusMap)
+        sessionPipeline.set(currentWorkspaceId, {
+          stages: derived,
+          beadStatuses: statusMap,
+          fetchedAt: now,
+        })
+
+        setHealthy()
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : String(error)
+        // bb-93xp: bd-missing errors used to fire reportBdError → yellow
+        // banner. The banner was removed; the failure still surfaces via
+        // the action's own error path (toast / inline message). No
+        // additional UI hook needed here.
+        if (
+          currentWorkspace?.mode === "server" &&
+          (msg.includes("ECONNREFUSED") ||
+            msg.includes("ETIMEDOUT") ||
+            msg.includes("connection refused") ||
+            msg.includes("timeout") ||
+            msg.includes("unreachable") ||
+            msg.includes("circuit breaker") ||
+            msg.includes("not found on Dolt server"))
+        ) {
+          setDegraded("Dolt server unreachable")
+        }
+      }
       setPipelineLoading(false)
-      return
-    }
-
-    try {
-      const result = await rpc.activity.listBeadsByStatus(databasePath)
-      // beadbox-8k3: pass the workspace's pipeline chain so the tile set
-      // reflects status.custom per pm/spec.md §4.9. Empty status.custom →
-      // just the 3 built-in tiles via composePipelineChain.
-      const derived = derivePipelineStages(result.beads, pipelineChain)
-      setStages(derived)
-      pipelineFetchedAtRef.current = now
-
-      // Build bead -> canonical pipeline stage map for cross-filter lookups.
-      // Backlog tile dropped per §4.9 strict-spec — P4 beads with
-      // status=open now map to the OPEN stage rather than a synthetic
-      // backlog stage. Priority filtering still lives in the filter-bar.
-      const statusMap = new Map<string, string>()
-      for (const bead of result.beads) {
-        statusMap.set(bead.id, toCanonicalStage(bead.status))
-      }
-      setBeadStatusMap(statusMap)
-      sessionPipeline.set(currentWorkspaceId, {
-        stages: derived,
-        beadStatuses: statusMap,
-        fetchedAt: now,
-      })
-
-      setHealthy()
-    } catch (error: unknown) {
-      const msg = error instanceof Error ? error.message : String(error)
-      // bb-93xp: bd-missing errors used to fire reportBdError → yellow
-      // banner. The banner was removed; the failure still surfaces via
-      // the action's own error path (toast / inline message). No
-      // additional UI hook needed here.
-      if (
-        currentWorkspace?.mode === "server" &&
-        (msg.includes("ECONNREFUSED") ||
-          msg.includes("ETIMEDOUT") ||
-          msg.includes("connection refused") ||
-          msg.includes("timeout") ||
-          msg.includes("unreachable") ||
-          msg.includes("circuit breaker") ||
-          msg.includes("not found on Dolt server"))
-      ) {
-        setDegraded("Dolt server unreachable")
-      }
-    }
-    setPipelineLoading(false)
-  }, [databasePath, currentWorkspaceId, currentWorkspace, setDegraded, pipelineChain])
+    },
+    [databasePath, currentWorkspaceId, currentWorkspace, setDegraded, pipelineChain],
+  )
 
   // beadbox-8k3: load the workspace's custom status chain so the pipeline
   // tile composition reflects status.custom. Uses the same RPC eng1's
@@ -388,15 +398,15 @@ function ActivityViewer() {
     }
   }, [databasePath, changeSignal])
 
-  // Initial pipeline fetch
+  // Initial pipeline fetch (served from the session cache inside the TTL)
   useEffect(() => {
-    fetchPipelineSnapshot()
+    fetchPipelineSnapshot("mount")
   }, [fetchPipelineSnapshot])
 
-  // Re-fetch pipeline on WebSocket changes (respects 30s cache)
+  // Re-fetch pipeline on bd change signals — bypasses the cache TTL.
   useEffect(() => {
     if (changeSignal > 0) {
-      fetchPipelineSnapshot()
+      fetchPipelineSnapshot("signal")
     }
   }, [changeSignal, fetchPipelineSnapshot])
 

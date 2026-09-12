@@ -253,6 +253,14 @@ export function _getSubscriptionChangeCount(): number {
   return subscriptionChangeCount
 }
 
+/**
+ * Test-only: deliver a `change` event exactly as the sidecar's subscription
+ * would (invalidate queries + bump the counter), without a stderr stream.
+ */
+export function _emitChangeForTests(): void {
+  applyEvent({ type: "change", trigger: "test" } as SubscriptionEvent)
+}
+
 /** Test-only: reset to zero between cases. */
 export function _resetSubscriptionChangeCount(): void {
   subscriptionChangeCount = 0
