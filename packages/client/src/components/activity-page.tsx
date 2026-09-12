@@ -3,7 +3,6 @@ import { useHasTrains } from "@/hooks/use-has-trains"
 import { X } from "lucide-react"
 import posthog from "posthog-js"
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react"
-import { isFeatureEnabled } from "@/lib/feature-flag"
 import { safeCapture } from "@/lib/posthog-safe"
 import { useActiveWorkspace } from "../hooks/use-active-workspace"
 import { useAppHealth } from "../hooks/use-app-health"
@@ -516,8 +515,7 @@ function ActivityViewer() {
           navigate({ to: "/" })
         }
         if (e.key === "3") {
-          const enabled = isFeatureEnabled("enable-formulas")
-          if (enabled) navigate({ to: "/formulas" as never })
+          navigate({ to: "/formulas" as never })
         }
         if (e.key === "4" && hasTrains) {
           navigate({ to: "/trains" as never })

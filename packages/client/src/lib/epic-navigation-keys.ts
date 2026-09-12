@@ -16,13 +16,11 @@
 //   - document.querySelector for the search input (gate keys: '/' and Cmd+F)
 //   - requestAnimationFrame for focus-on-next-frame after Cmd+F
 //   - sessionStorage.getItem/.removeItem for the activity-feed back-nav
-//   - isFeatureEnabled (lib/feature-flag) for the EA gate on Cmd+3
 // These are deliberately NOT plumbed through ctx because they're stable
 // global side-effects and adding them would bloat the context type without
 // improving testability — tests stub navigator/document directly when
 // they need to.
 
-import { isFeatureEnabled } from "@/lib/feature-flag"
 import type { Bead } from "./types"
 
 export interface NavigableItem {
@@ -74,7 +72,6 @@ const focusSearchInput = (): void => {
   searchInput?.focus()
 }
 
-const isFormulasFlagEnabled = (): boolean => isFeatureEnabled("enable-formulas")
 
 const isTypingTarget = (target: EventTarget | null): boolean =>
   target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement
@@ -108,7 +105,7 @@ const tryViewSwitchShortcut = (e: KeyboardEvent, ctx: KeyNavContext): boolean =>
   if (e.key !== "1" && e.key !== "2" && e.key !== "3" && e.key !== "4") return false
   e.preventDefault()
   if (e.key === "2") ctx.router.push("/activity")
-  if (e.key === "3" && isFormulasFlagEnabled()) ctx.router.push("/formulas")
+  if (e.key === "3") ctx.router.push("/formulas")
   if (e.key === "4" && ctx.hasTrains) ctx.router.push("/trains")
   return true
 }

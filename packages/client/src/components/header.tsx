@@ -24,8 +24,6 @@ import {
   Settings,
   TrainFront,
 } from "lucide-react"
-import posthog from "posthog-js"
-import { isFeatureEnabled } from "@/lib/feature-flag"
 import { safeCapture } from "@/lib/posthog-safe"
 import { Fragment, useCallback, useEffect, useState } from "react"
 import type { AppHealth } from "../hooks/use-app-health"
@@ -169,15 +167,7 @@ export function Header({
   const { isMobile, isTablet } = useViewport()
   const [showHint, setShowHint] = useState(false)
   const [healthDetailsOpen, setHealthDetailsOpen] = useState(false)
-  const [formulasEnabled, setFormulasEnabled] = useState(false)
   const hasTrains = useHasTrains(currentWorkspace.databasePath)
-
-  useEffect(() => {
-    const check = () => isFeatureEnabled("enable-formulas")
-    setFormulasEnabled(check())
-    const cleanup = posthog.onFeatureFlags?.(() => setFormulasEnabled(check()))
-    return () => cleanup?.()
-  }, [])
 
   const navigateTo = useCallback(
     (destination: string, source: "tab" | "dropdown") => {
@@ -325,48 +315,20 @@ export function Header({
               </Tooltip>
               <Tooltip>
                 <TooltipTrigger asChild>
-                  {formulasEnabled ? (
-                    <button
-                      onClick={() => navigateTo("formulas", "tab")}
-                      className={cn(
-                        "px-2.5 py-1.5 text-sm font-medium rounded-md transition-colors inline-flex items-center gap-1.5",
-                        pathname === "/formulas"
-                          ? "bg-accent text-foreground"
-                          : "text-muted-foreground hover:text-foreground hover:bg-accent/50",
-                      )}
-                    >
-                      <FlaskConical className="h-3.5 w-3.5" />
-                      Formulas
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <span className="rounded-full bg-pink-500/10 border border-pink-500/20 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-pink-400">
-                            EA
-                          </span>
-                        </TooltipTrigger>
-                        <TooltipContent>Early Access</TooltipContent>
-                      </Tooltip>
-                    </button>
-                  ) : (
-                    <span
-                      className="px-2.5 py-1.5 text-sm font-medium rounded-md inline-flex items-center gap-1.5 text-muted-foreground/50 cursor-not-allowed"
-                      aria-disabled="true"
-                    >
-                      <FlaskConical className="h-3.5 w-3.5" />
-                      Formulas
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <span className="rounded-full bg-pink-500/10 border border-pink-500/20 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-pink-400">
-                            EA
-                          </span>
-                        </TooltipTrigger>
-                        <TooltipContent>Early Access</TooltipContent>
-                      </Tooltip>
-                    </span>
-                  )}
+                  <button
+                    onClick={() => navigateTo("formulas", "tab")}
+                    className={cn(
+                      "px-2.5 py-1.5 text-sm font-medium rounded-md transition-colors inline-flex items-center gap-1.5",
+                      pathname === "/formulas"
+                        ? "bg-accent text-foreground"
+                        : "text-muted-foreground hover:text-foreground hover:bg-accent/50",
+                    )}
+                  >
+                    <FlaskConical className="h-3.5 w-3.5" />
+                    Formulas
+                  </button>
                 </TooltipTrigger>
-                <TooltipContent>
-                  {formulasEnabled ? "Formulas \u2318\u0033" : "Formulas (early access)"}
-                </TooltipContent>
+                <TooltipContent>Formulas \u2318\u0033</TooltipContent>
               </Tooltip>
               {hasTrains && (
               <Tooltip>

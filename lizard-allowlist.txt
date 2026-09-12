@@ -68,6 +68,7 @@ packages/client/src/components/formula-dag.tsx:detectParallelGroups  # CCN 21 �
 packages/client/src/components/formula-dag.tsx:StepNodeComponent  # CCN 18 — DAG step-node render with status branches; pre-existing  # bb-ej3u
 packages/client/src/components/bead-scheduling-controls.tsx:SchedulingControls  # CCN 20 — due/defer/estimate controls panel; pre-existing  # bb-ej3u
 packages/client/src/components/formula-tree.tsx:formatDescription  # CCN 109 — formula-tree god-render (refactor candidate); pre-existing  # bb-ej3u
+packages/client/src/components/header.tsx:Header  # CCN 23 — NEWLY VISIBLE true positive, not a false one: removing the Formulas flag stopped the analyzer folding Header into BeadboxLogoLoading, so it is now scored on its own. The file's real branching went DOWN (58->56 tokens). Debt is real; beadbox-smx extracts the nav tab strip and removes this line.  # beadbox-01f.1
 packages/client/src/components/header.tsx:BeadboxLogoLoading  # CCN 35 — animated boot-state header; pre-existing  # bb-ej3u
 packages/client/src/components/header.tsx:(anonymous)  # CCN 20 — header IIFE for tab + workspace switcher; pre-existing  # bb-ej3u
 packages/client/src/components/bead-detail-panel.tsx:(anonymous)  # CCN 27 — detail panel render IIFE branches; pre-existing  # bb-ej3u

@@ -181,15 +181,16 @@ describe("handleGlobalShortcut", () => {
     expect(ctx.router.push).toHaveBeenCalledWith("/activity")
   })
 
-  test("Cmd+3 gated by EA flag (localStorage override)", () => {
+  test("Cmd+3 navigates to /formulas with no override and no PostHog (beadbox-01f.1)", () => {
+    // Formulas is GA: the route is unconditional. This is the bead's AC-2 in
+    // unit form -- nothing set in localStorage, no env override surviving
+    // beforeEach, and PostHog uninitialised here. Before the flag was removed
+    // this exact state routed NOWHERE, which is how the feature came to be off
+    // for most users by accident rather than by decision.
     const ctx = makeCtx()
-    window.localStorage.setItem(
-      "beadbox_flag_overrides",
-      JSON.stringify({ "enable-formulas": true }),
-    )
+    expect(window.localStorage.getItem("beadbox_flag_overrides")).toBeNull()
     expect(handleGlobalShortcut(fireKey("3", { metaKey: true }), ctx)).toBe(true)
     expect(ctx.router.push).toHaveBeenCalledWith("/formulas")
-    window.localStorage.removeItem("beadbox_flag_overrides")
   })
 
   test("Cmd+4 navigates to /trains when the workspace has plans", () => {
@@ -204,19 +205,18 @@ describe("handleGlobalShortcut", () => {
     expect(ctx.router.push).not.toHaveBeenCalledWith("/trains")
   })
 
-  test("Cmd+3 with flag off does not navigate", () => {
+  test("a stale flag override can no longer suppress Cmd+3 (beadbox-01f.1)", () => {
+    // Anyone who set the escape-hatch override while Formulas was gated still
+    // has it in localStorage. The route no longer consults any flag, so a
+    // leftover false must not hide a GA feature. Deleting the branch rather
+    // than defaulting the flag true is what makes this hold.
     const ctx = makeCtx()
-    // beadbox-l5i.1 / qa1: pin the override to false rather than REMOVING it,
-    // so this asserts "flag off" instead of "no opinion anywhere". The
-    // ordering hazard that actually made this test fail on hosted Linux is
-    // handled by the env-override clearing in beforeEach above. Symmetric
-    // with the flag-on test, which sets true.
     window.localStorage.setItem(
       "beadbox_flag_overrides",
-      JSON.stringify({ "enable-formulas": false }),
+      JSON.stringify({ "formulas-legacy-override": false }),
     )
     expect(handleGlobalShortcut(fireKey("3", { metaKey: true }), ctx)).toBe(true)
-    expect(ctx.router.push).not.toHaveBeenCalled()
+    expect(ctx.router.push).toHaveBeenCalledWith("/formulas")
     window.localStorage.removeItem("beadbox_flag_overrides")
   })
 

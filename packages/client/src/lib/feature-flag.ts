@@ -8,9 +8,18 @@
 //   2. Runtime localStorage: localStorage.beadbox_flag_overrides='{"flag":true}'
 //   3. PostHog SDK (try/catch — returns false if SDK is dark or throws)
 //
-// Both override sources use the literal flag key (e.g. "enable-formulas").
+// Both override sources use the literal flag key (e.g. "enable-ai-help").
 // Designed to stay in place as a permanent escape hatch even after bb-aurr
 // fixes the SDK init.
+//
+// beadbox-01f.1: KEPT deliberately after Formulas went GA and stopped being its
+// only caller. It is the sole override path for a live open bug, and three
+// shipping flags -- use-private-update-repo, enable-ai-help,
+// enable-molecule-view -- still call posthog.isFeatureEnabled directly with no
+// hatch at all, so they evaluate false whenever the SDK is dark. That is the
+// same accident that hid Formulas. See feature-flag.test.ts, which is kept
+// green so this is tested infrastructure rather than machinery that merely
+// looks alive.
 import posthog from "posthog-js"
 
 function readEnvOverride(flag: string): boolean | undefined {
