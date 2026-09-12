@@ -1,10 +1,13 @@
 name: Release
 
-# Bun is pinned to 1.4.0 in every job below (setup-bun bun-version, and the
-# Windows manual download). beadbox-e6a: the unpinned v0.26.1-rc.1 Linux build
-# picked up Bun 1.4.2 and its compiled sidecar rejected every kkrpc request
-# (NUL on the stdin read path); 1.4.0 is the last version known to handshake.
-# Bump deliberately, with a Linux release-mode smoke.
+# Bun is pinned to 1.3.14 in every job below (setup-bun bun-version, and the
+# Windows manual download). beadbox-e6a: with setup-bun unpinned, the v0.26.1
+# Linux builds picked up Bun 1.4.x and the compiled sidecar rejected every
+# kkrpc request (a NUL on the stdin read path). Isolated to the Bun version:
+# the same source compiled with 1.3.14 handshakes on Linux, 1.4.0 and 1.4.2
+# do not; macOS is unaffected. 1.3.14 is the last version OBSERVED to
+# handshake on Linux. Do not bump past it without a Linux release-mode
+# handshake (beadbox-3vx); the upstream report is tracked on beadbox-e6a.
 on:
   push:
     tags: ["v*"]
@@ -112,7 +115,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.0
+          bun-version: 1.3.14
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master 2026-09-03; toolchain chosen via input
@@ -170,7 +173,7 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.0
+          bun-version: 1.3.14
       - name: Install bd (beads CLI)
         # beadbox-l5i.6.3: ported verbatim from quality-gates.yml. The retired
         # homelab runner had bd installed; hosted runners do not, so the server
@@ -206,7 +209,7 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.0
+          bun-version: 1.3.14
       - name: Install bd (beads CLI)
         # beadbox-l5i.6.3: ported verbatim from quality-gates.yml. The retired
         # homelab runner had bd installed; hosted runners do not, so the server
@@ -310,7 +313,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.0
+          bun-version: 1.3.14
 
       - name: Extract version from tag
         id: version
@@ -648,7 +651,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.0
+          bun-version: 1.3.14
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master 2026-09-03; toolchain chosen via input
@@ -835,7 +838,7 @@ jobs:
           $zipPath = "$env:RUNNER_TEMP\bun-windows-x64.zip"
           $extractRoot = "$env:RUNNER_TEMP\bun-extract"
           if (Test-Path $extractRoot) { Remove-Item -Recurse -Force $extractRoot }
-          Invoke-WebRequest -Uri "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-windows-x64.zip" -OutFile $zipPath
+          Invoke-WebRequest -Uri "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-windows-x64.zip" -OutFile $zipPath
           Expand-Archive -Path $zipPath -DestinationPath $extractRoot -Force
           $bunExe = Get-ChildItem -Path $extractRoot -Recurse -Filter "bun.exe" | Select-Object -First 1
           if (-not $bunExe) { throw "bun.exe not found in extracted zip" }
