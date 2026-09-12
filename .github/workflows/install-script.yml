@@ -1,0 +1,92 @@
+name: Install script
+
+# beadbox-6zq: scripts/install.sh is advertised on the website and in the
+# generated markdown that AI assistants read. It was advertised for months
+# while the file did not exist, and the failure was silent. This workflow is
+# the smoke check that keeps an advertised script from rotting again: it runs
+# shellcheck, parses the script under bash, and exercises --check, which
+# resolves the real Latest release and asserts a matching asset with a
+# published digest exists.
+
+on:
+  push:
+    branches: [main]
+    paths: [".github/workflows/install-script.yml", "scripts/install.sh"]
+  pull_request:
+    paths: [".github/workflows/install-script.yml", "scripts/install.sh"]
+  workflow_dispatch:
+  schedule:
+    # A release can remove the asset the script resolves without touching the
+    # script, so time is the trigger that catches that. Weekly, Mondays 09:00 UTC.
+    - cron: "0 9 * * 1"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: "Install script (shellcheck + --check on ${{ matrix.os }})"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Executable bit
+        run: test -x scripts/install.sh || { echo "::error::scripts/install.sh is not executable"; exit 1; }
+
+      - name: shellcheck
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck --severity=warning scripts/install.sh
+
+      - name: Parses under bash
+        run: bash -n scripts/install.sh
+
+      - name: "--help exits 0 and prints usage"
+        run: |
+          set -euo pipefail
+          out=$(bash scripts/install.sh --help)
+          printf '%s\n' "$out" | grep -q -- '--check' || { echo "::error::--help did not document --check"; exit 1; }
+
+      - name: "--check resolves a real asset for this platform"
+        # The assertion that would have caught the original bug: it fetches the
+        # live release and fails if this platform has no matching asset or the
+        # asset has no published digest.
+        run: bash scripts/install.sh --check
+
+      - name: "Unsupported platforms fail loudly, not silently"
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/fake"
+          printf '#!/bin/sh\ncase "$1" in -s) echo Linux;; -m) echo aarch64;; esac\n' > "$RUNNER_TEMP/fake/uname"
+          chmod +x "$RUNNER_TEMP/fake/uname"
+          set +e
+          out=$(PATH="$RUNNER_TEMP/fake:$PATH" bash scripts/install.sh 2>&1); rc=$?
+          set -e
+          [ "$rc" -ne 0 ] || { echo "::error::unsupported platform exited 0 -- silent failure"; printf '%s\n' "$out"; exit 1; }
+          printf '%s\n' "$out" | grep -qi "does not publish" || { echo "::error::unsupported platform gave no readable reason"; printf '%s\n' "$out"; exit 1; }
+          echo "unsupported platform: exit $rc with a readable message"
+
+      - name: "A truncated script cannot execute anything"
+        # The half of the silent-failure bug that survives the URL resolving:
+        # a cut-off download must define functions and run none of them.
+        run: |
+          set -euo pipefail
+          head -c 4000 scripts/install.sh > "$RUNNER_TEMP/trunc.sh"
+          set +e
+          out=$(bash "$RUNNER_TEMP/trunc.sh" 2>/dev/null); rc=$?
+          set -e
+          [ "$rc" -ne 0 ] || { echo "::error::a truncated installer exited 0"; exit 1; }
+          [ -z "$out" ] || { echo "::error::a truncated installer produced output: $out"; exit 1; }
+          echo "truncated installer: exit $rc, no output, nothing executed"
