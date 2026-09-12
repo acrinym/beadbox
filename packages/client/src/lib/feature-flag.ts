@@ -12,14 +12,21 @@
 // Designed to stay in place as a permanent escape hatch even after bb-aurr
 // fixes the SDK init.
 //
-// beadbox-01f.1: KEPT deliberately after Formulas went GA and stopped being its
-// only caller. It is the sole override path for a live open bug, and three
-// shipping flags -- use-private-update-repo, enable-ai-help,
-// enable-molecule-view -- still call posthog.isFeatureEnabled directly with no
-// hatch at all, so they evaluate false whenever the SDK is dark. That is the
-// same accident that hid Formulas. See feature-flag.test.ts, which is kept
-// green so this is tested infrastructure rather than machinery that merely
-// looks alive.
+// beadbox-01f.1: THIS HELPER HAS NO PRODUCTION CALLERS. Formulas was its last
+// one, and Formulas went GA. Nothing in packages/ imports it except its own
+// test; the nine remaining isFeatureEnabled hits in the app are direct
+// posthog.isFeatureEnabled SDK calls that bypass this file entirely.
+//
+// It is KEPT anyway, deliberately, as dead code with documented intent: the
+// override path it implements is the mitigation those direct callers need for a
+// live open bug (bb-aurr -- a dark SDK returns false, so a flag at full rollout
+// reads as off), and beadbox-zfv is the bead to route them through here or
+// record why not. Delete this file if beadbox-zfv is closed as won't-do.
+//
+// It is NOT currently protecting anything. Nothing reads it at runtime, and it
+// is tree-shaken out of the bundle. Its test is kept green so that whoever
+// wires the first caller inherits working machinery rather than untested code
+// that merely looks alive.
 import posthog from "posthog-js"
 
 function readEnvOverride(flag: string): boolean | undefined {
