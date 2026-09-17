@@ -1546,10 +1546,27 @@ jobs:
   #    that actually ships us; the retired two-stage promote workflow went
   #    0-for-4 and was bypassed (beadbox-0cy).
   #    Both run only after `promote` has made the release public.
+  #
+  #    beadbox-uc1 — WHY THE if: BELOW SPELLS OUT RESULTS. On the first final
+  #    (v0.26.2) both jobs were SKIPPED while promote succeeded and the run
+  #    reported success. Their if: had no status-check function, so GitHub
+  #    prepended success(), and job-level success() is false when ANY job in
+  #    the transitive needs ancestry was skipped — build-windows is skipped by
+  #    design on every push and sits under promote. promote itself survives
+  #    that via always(). Any job that gains a needs edge to promote MUST use
+  #    !cancelled() plus explicit needs.<job>.result checks like these; do not
+  #    "simplify" the condition back to the bare form. Proven in real execution
+  #    (proof run 35220610084): the bare form skips, this form runs, in the
+  #    same topology on a push event.
 
   publish-changelog:
     name: "Publish changelog/<TAG>.md"
-    if: ${{ github.event_name == 'push' && needs.validate-tag.outputs.is_final == 'true' }}
+    if: >-
+      !cancelled()
+      && needs.validate-tag.result == 'success'
+      && needs.promote.result == 'success'
+      && github.event_name == 'push'
+      && needs.validate-tag.outputs.is_final == 'true'
     needs: [validate-tag, promote]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -1626,7 +1643,12 @@ jobs:
     # secret (its ref policy admits only v* tags and main), matching every other
     # secret-bearing job in this file.
     environment: release
-    if: ${{ github.event_name == 'push' && needs.validate-tag.outputs.is_final == 'true' }}
+    if: >-
+      !cancelled()
+      && needs.validate-tag.result == 'success'
+      && needs.promote.result == 'success'
+      && github.event_name == 'push'
+      && needs.validate-tag.outputs.is_final == 'true'
     needs: [validate-tag, promote]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -1728,3 +1750,31 @@ jobs:
           git commit -m "beadbox: update to ${VERSION}"
           git push origin HEAD:main
           echo "pushed cask ${VERSION}"
+
+  # ── Terminal gate (beadbox-uc1): a final whose publish jobs did not run is a
+  #    RED run, not a green one. The v0.26.2 skip was invisible because nothing
+  #    downstream asserted on those two jobs and the run-level conclusion only
+  #    reports failures, never absences. push-only, like the jobs it guards: a
+  #    workflow_dispatch rebuild of a final tag never publishes by design.
+  final-publish-gate:
+    name: "Final tag published its cask and changelog"
+    needs: [validate-tag, publish-changelog, publish-cask]
+    if: >-
+      always() && github.event_name == 'push'
+      && needs.validate-tag.outputs.is_final == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    steps:
+      - env:
+          CHANGELOG: ${{ needs.publish-changelog.result }}
+          CASK: ${{ needs.publish-cask.result }}
+        run: |
+          echo "publish-changelog: $CHANGELOG"
+          echo "publish-cask:      $CASK"
+          if [ "$CHANGELOG" != "success" ] || [ "$CASK" != "success" ]; then
+            echo "::error::final tag published without its cask/changelog jobs succeeding (changelog=$CHANGELOG, cask=$CASK)"
+            exit 1
+          fi
+          echo "both post-publish jobs succeeded"
